@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
-type TaskKind = 'grammar_fix' | 'translate_chinese' | 'translate_chinese_to_english'
+type TaskKind = 'auto_process'
 
 type AppConfig = {
   api_key: string
@@ -16,12 +16,12 @@ function App() {
   const popupInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [config, setConfig] = useState<AppConfig>({ api_key: '', model: 'gpt-4.1-mini' })
   const [input, setInput] = useState('')
-  const [output, setOutput] = useState('')
+  const [previousInput, setPreviousInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ kind: StatusKind; text: string }>({
     kind: 'idle',
-    text: 'Enter English text, then choose grammar fix or Chinese translation.',
+    text: 'Paste Chinese or English text. Chinese is translated to English; English is polished into natural grammar.',
   })
 
   useEffect(() => {
@@ -71,20 +71,15 @@ function App() {
     }
 
     setBusy(true)
-    setOutput('')
+    setPreviousInput(input)
     setStatus({
       kind: 'loading',
-      text:
-        task === 'grammar_fix'
-          ? 'Fixing grammar...'
-          : task === 'translate_chinese'
-            ? 'Translating to Chinese...'
-            : 'Translating to English...',
+      text: 'Processing text...',
     })
 
     try {
       const response = await window.linguafix.processText({ task, text: input })
-      setOutput(response.output)
+      setInput(response.output)
       setStatus({ kind: 'success', text: 'Completed.' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Request failed.'
@@ -95,17 +90,29 @@ function App() {
   }
 
   async function copyOutput() {
-    if (!output.trim()) {
-      setStatus({ kind: 'error', text: 'There is no output to copy.' })
+    if (!input.trim()) {
+      setStatus({ kind: 'error', text: 'There is no text to copy.' })
       return
     }
 
     try {
-      await navigator.clipboard.writeText(output)
-      setStatus({ kind: 'success', text: 'Output copied to clipboard.' })
+      await navigator.clipboard.writeText(input)
+      setStatus({ kind: 'success', text: 'Text copied to clipboard.' })
     } catch {
       setStatus({ kind: 'error', text: 'Could not copy output.' })
     }
+  }
+
+  function undoLastChange() {
+    if (!previousInput) {
+      setStatus({ kind: 'error', text: 'There is no previous version to restore.' })
+      return
+    }
+
+    const currentInput = input
+    setInput(previousInput)
+    setPreviousInput(currentInput)
+    setStatus({ kind: 'success', text: 'Previous version restored.' })
   }
 
   async function hideQuickTranslatePopup() {
@@ -122,7 +129,7 @@ function App() {
         <header className="popup-header">
           <div>
             <p className="eyebrow">Hotkey popup</p>
-            <h1>Chinese to English</h1>
+            <h1>Quick Improve</h1>
             <p className="hero-copy">
               Press <strong>Esc</strong> to close. Use <strong>Cmd/Ctrl+Shift+L</strong> to open
               this window from anywhere.
@@ -136,8 +143,8 @@ function App() {
         <section className="panel popup-panel">
           <div className="panel-heading">
             <div>
-              <h2>Quick Translate</h2>
-              <p>Paste Chinese text and translate it into natural English.</p>
+              <h2>Auto Process</h2>
+              <p>Chinese becomes natural English. English becomes cleaner, more natural English.</p>
             </div>
             <div className={`status ${status.kind}`}>{status.text}</div>
           </div>
@@ -155,27 +162,23 @@ function App() {
 
               if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
                 event.preventDefault()
-                void runTask('translate_chinese_to_english')
+                void runTask('auto_process')
               }
             }}
-            placeholder="输入中文，然后按 Cmd/Ctrl+Enter 翻译成英文..."
+            placeholder="输入中文或英文，然后按 Cmd/Ctrl+Enter..."
           />
 
           <div className="action-row">
-            <button disabled={busy || loading} onClick={() => void runTask('translate_chinese_to_english')}>
-              Translate to English
+            <button disabled={busy || loading} onClick={() => void runTask('auto_process')}>
+              Improve Text
+            </button>
+            <button className="secondary" disabled={busy || !previousInput} onClick={undoLastChange}>
+              Undo
             </button>
             <button className="secondary" disabled={busy} onClick={() => void copyOutput()}>
-              Copy Output
+              Copy Text
             </button>
           </div>
-
-          <textarea
-            className="popup-textarea output"
-            value={output}
-            readOnly
-            placeholder="English output appears here..."
-          />
         </section>
       </div>
     )
@@ -188,8 +191,8 @@ function App() {
           <p className="eyebrow">Electron + React + TypeScript + Rust</p>
           <h1>LinguaFix</h1>
           <p className="hero-copy">
-            Desktop writing help for English cleanup and English-to-Chinese translation, with a
-            React renderer and a local Rust service.
+            Desktop writing help with one automatic flow: Chinese is translated into English, and
+            English is rewritten into correct, natural English.
           </p>
         </div>
         <div className="hero-card">
@@ -240,53 +243,38 @@ function App() {
       <section className="panel actions-panel">
         <div className="panel-heading">
           <div>
-            <h2>Actions</h2>
-            <p>Run one task at a time against the local Rust service.</p>
+            <h2>Action</h2>
+            <p>One input box, one AI action. The model decides whether to translate or polish.</p>
           </div>
           <div className={`status ${status.kind}`}>{status.text}</div>
         </div>
 
         <div className="action-row">
-          <button disabled={busy || loading} onClick={() => void runTask('grammar_fix')}>
-            Fix English Grammar
+          <button disabled={busy || loading} onClick={() => void runTask('auto_process')}>
+            Improve Text
           </button>
-          <button disabled={busy || loading} onClick={() => void runTask('translate_chinese')}>
-            Translate to Chinese
-          </button>
-          <button disabled={busy || loading} onClick={() => void runTask('translate_chinese_to_english')}>
-            Translate Chinese to English
+          <button className="secondary" disabled={busy || !previousInput} onClick={undoLastChange}>
+            Undo
           </button>
           <button className="secondary" disabled={busy} onClick={() => void copyOutput()}>
-            Copy Output
+            Copy Text
           </button>
         </div>
       </section>
 
-      <section className="workspace">
-        <article className="panel editor-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>English Input</h2>
-              <p>Paste or write the original English text here.</p>
-            </div>
+      <article className="panel editor-panel single-editor">
+        <div className="panel-heading">
+          <div>
+            <h2>Text</h2>
+            <p>Paste Chinese or English text here. Processing replaces the text in this same box.</p>
           </div>
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="Write the English text you want to improve or translate..."
-          />
-        </article>
-
-        <article className="panel editor-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Output</h2>
-              <p>The corrected English or Simplified Chinese translation appears here.</p>
-            </div>
-          </div>
-          <textarea value={output} readOnly placeholder="The response will appear here..." />
-        </article>
-      </section>
+        </div>
+        <textarea
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          placeholder="If the text is Chinese, it will be translated into English. If it is English, it will be polished."
+        />
+      </article>
     </div>
   )
 }

@@ -5,7 +5,7 @@ type LinguaFixConfig = {
   model: string
 }
 
-type LinguaFixTask = 'grammar_fix' | 'translate_chinese' | 'translate_chinese_to_english'
+type LinguaFixTask = 'auto_process'
 
 type LinguaFixProcessRequest = {
   task: LinguaFixTask

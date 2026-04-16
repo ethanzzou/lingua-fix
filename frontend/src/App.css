@@ -159,17 +159,15 @@ button.ghost {
   padding-inline: 14px;
 }
 
-.workspace {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 20px;
-}
-
 .editor-panel textarea {
   min-height: 420px;
   resize: vertical;
   padding: 18px;
   line-height: 1.6;
+}
+
+.single-editor textarea {
+  min-height: 520px;
 }
 
 .popup-textarea {
@@ -231,7 +229,6 @@ button.ghost {
   }
 
   .hero,
-  .workspace,
   .settings-grid {
     grid-template-columns: 1fr;
   }

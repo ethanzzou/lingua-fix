@@ -6,10 +6,10 @@ LinguaFix now uses the same general app split you asked for:
 - React + TypeScript for the renderer UI
 - Rust for the local backend service
 
-The app supports two AI actions:
+The app supports one automatic AI action:
 
-- Fix English grammar
-- Translate English to Simplified Chinese
+- If the input is Chinese, it translates it into natural English
+- If the input is English, it rewrites it into correct, natural English
 
 ## Requirements
 

@@ -158,22 +158,14 @@ fn config_path() -> PathBuf {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AiTask {
-    GrammarFix,
-    TranslateChinese,
-    TranslateChineseToEnglish,
+    AutoProcess,
 }
 
 impl AiTask {
     fn system_prompt(&self) -> &'static str {
         match self {
-            Self::GrammarFix => {
-                "You fix English grammar, spelling, punctuation, and awkward phrasing while preserving the original meaning and tone. Return only the corrected English text."
-            }
-            Self::TranslateChinese => {
-                "Translate the user's English text into natural Simplified Chinese. Preserve the meaning, tone, and formatting. Return only the Chinese translation."
-            }
-            Self::TranslateChineseToEnglish => {
-                "Translate the user's Chinese text into natural English. Preserve the meaning, tone, and formatting. Return only the English translation."
+            Self::AutoProcess => {
+                "Decide what to do from the user's text. If the input is primarily Chinese, translate it into natural English while preserving meaning and tone. If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, and phrasing while preserving meaning and tone. Return only the final text with no explanation."
             }
         }
     }
