@@ -1,0 +1,61 @@
+:root {
+  font-family:
+    "Instrument Sans",
+    "Inter",
+    "Segoe UI",
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #dbe7e6;
+  background:
+    radial-gradient(circle at top left, rgba(58, 116, 108, 0.26), transparent 34%),
+    radial-gradient(circle at top right, rgba(34, 81, 120, 0.28), transparent 32%),
+    linear-gradient(180deg, #0d181d 0%, #101d23 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2.6rem, 4vw, 4.6rem);
+  line-height: 0.96;
+  letter-spacing: -0.05em;
+  color: #f1fbfb;
+  margin-bottom: 14px;
+}
+
+h2 {
+  font-size: 1.1rem;
+  color: #effafa;
+  margin-bottom: 6px;
+}
+
+p {
+  color: #a9c0c0;
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+}
