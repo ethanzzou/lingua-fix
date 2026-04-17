@@ -10,18 +10,24 @@ type AppConfig = {
 
 type StatusKind = 'idle' | 'loading' | 'success' | 'error'
 
+type Page = 'main' | 'settings'
+
 function App() {
   const isQuickTranslatePopup =
     new URLSearchParams(window.location.search).get('popup') === 'quick-translate'
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
   const popupInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const overlayInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const [page, setPage] = useState<Page>('main')
   const [config, setConfig] = useState<AppConfig>({ api_key: '', model: 'gpt-4.1-mini' })
   const [input, setInput] = useState('')
   const [previousInput, setPreviousInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [showQuickTranslateOverlay, setShowQuickTranslateOverlay] = useState(false)
   const [status, setStatus] = useState<{ kind: StatusKind; text: string }>({
     kind: 'idle',
-    text: 'Paste Chinese or English text. Chinese is translated to English; English is polished into natural grammar.',
+    text: '',
   })
 
   useEffect(() => {
@@ -51,6 +57,25 @@ function App() {
     window.addEventListener('focus', handleVisibility)
     return () => window.removeEventListener('focus', handleVisibility)
   }, [isQuickTranslatePopup])
+
+  useEffect(() => {
+    if (isQuickTranslatePopup) {
+      return
+    }
+
+    return window.linguafix.onShowQuickTranslateOverlay(() => {
+      setShowQuickTranslateOverlay(true)
+      window.setTimeout(() => overlayInputRef.current?.focus(), 0)
+    })
+  }, [isQuickTranslatePopup])
+
+  useEffect(() => {
+    if (!showQuickTranslateOverlay) {
+      return
+    }
+
+    overlayInputRef.current?.focus()
+  }, [showQuickTranslateOverlay])
 
   async function persistConfig(nextConfig: AppConfig) {
     setConfig(nextConfig)
@@ -123,32 +148,57 @@ function App() {
     }
   }
 
+  function closeQuickTranslateOverlay() {
+    setShowQuickTranslateOverlay(false)
+  }
+
+  const toolbarState = (() => {
+    if (page === 'settings') {
+      if (loading) {
+        return { kind: 'loading' as StatusKind, text: 'Loading' }
+      }
+
+      if (status.kind === 'error') {
+        return { kind: 'error' as StatusKind, text: 'Attention' }
+      }
+
+      if (status.kind === 'success') {
+        return { kind: 'success' as StatusKind, text: 'Saved' }
+      }
+
+      return { kind: 'idle' as StatusKind, text: 'Ready' }
+    }
+
+    if (busy || status.kind === 'loading') {
+      return { kind: 'loading' as StatusKind, text: 'Working' }
+    }
+
+    if (status.kind === 'error') {
+      return { kind: 'error' as StatusKind, text: 'Attention' }
+    }
+
+    if (status.kind === 'success') {
+      return { kind: 'success' as StatusKind, text: 'Updated' }
+    }
+
+    return loading
+      ? { kind: 'loading' as StatusKind, text: 'Loading' }
+      : { kind: 'idle' as StatusKind, text: 'Ready' }
+  })()
+
   if (isQuickTranslatePopup) {
     return (
-      <div className="popup-shell">
-        <header className="popup-header">
-          <div>
-            <p className="eyebrow">Hotkey popup</p>
-            <h1>Quick Improve</h1>
-            <p className="hero-copy">
-              Press <strong>Esc</strong> to close. Use <strong>Cmd/Ctrl+Shift+L</strong> to open
-              this window from anywhere.
-            </p>
+      <div className={`app-frame popup-frame${isMac ? ' macos-frame' : ''}`}>
+        <header className="popup-bar">
+          <span className="popup-bar-title">Quick Translate</span>
+          <div className="popup-bar-actions">
+            <button className="toolbar-chip" onClick={() => void hideQuickTranslatePopup()}>
+              Close
+            </button>
           </div>
-          <button className="secondary ghost" onClick={() => void hideQuickTranslatePopup()}>
-            Close
-          </button>
         </header>
 
-        <section className="panel popup-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Auto Process</h2>
-              <p>Chinese becomes natural English. English becomes cleaner, more natural English.</p>
-            </div>
-            <div className={`status ${status.kind}`}>{status.text}</div>
-          </div>
-
+        <div className="popup-shell">
           <textarea
             ref={popupInputRef}
             className="popup-textarea"
@@ -165,117 +215,235 @@ function App() {
                 void runTask('auto_process')
               }
             }}
-            placeholder="输入中文或英文，然后按 Cmd/Ctrl+Enter..."
+            placeholder="Paste or type text to improve…"
           />
+        </div>
 
-          <div className="action-row">
-            <button disabled={busy || loading} onClick={() => void runTask('auto_process')}>
-              Improve Text
-            </button>
-            <button className="secondary" disabled={busy || !previousInput} onClick={undoLastChange}>
+        <footer className="popup-footer">
+          <div className="popup-footer-status">
+            {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
+          </div>
+          <div className="popup-footer-actions">
+            <button
+              className="toolbar-chip"
+              disabled={!previousInput}
+              onClick={undoLastChange}
+            >
               Undo
             </button>
-            <button className="secondary" disabled={busy} onClick={() => void copyOutput()}>
-              Copy Text
+            <button className="toolbar-chip" onClick={() => void copyOutput()}>
+              Copy
+            </button>
+            <button
+              className="toolbar-chip toolbar-chip-primary"
+              disabled={busy || loading}
+              onClick={() => void runTask('auto_process')}
+            >
+              Improve
             </button>
           </div>
-        </section>
+        </footer>
       </div>
     )
   }
 
   return (
-    <div className="app-shell">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">Electron + React + TypeScript + Rust</p>
-          <h1>LinguaFix</h1>
-          <p className="hero-copy">
-            Desktop writing help with one automatic flow: Chinese is translated into English, and
-            English is rewritten into correct, natural English.
-          </p>
+    <div className={`app-frame${isMac ? ' macos-frame' : ''}`}>
+      <header className="control-bar">
+        <div className="control-bar-leading">
+          <button
+            className="toolbar-icon"
+            disabled={page === 'main'}
+            onClick={() => setPage('main')}
+            aria-label="Go back"
+          >
+            <ChevronLeftIcon />
+          </button>
+          <button className="toolbar-icon" disabled aria-label="Go forward">
+            <ChevronRightIcon />
+          </button>
         </div>
-        <div className="hero-card">
-          <div className="hero-label">Model</div>
-          <div className="hero-value">{config.model || 'gpt-4.1-mini'}</div>
-          <div className="hero-note">
-            Quick popup hotkey: <strong>Cmd/Ctrl+Shift+L</strong>
-          </div>
+
+        <div className="control-bar-title">
+          <span className="control-bar-title-primary">
+            {page === 'settings' ? 'Application Settings' : 'LinguaFix'}
+          </span>
+          <span className="control-bar-title-secondary">
+            {page === 'settings' ? 'Local configuration' : 'Writing Studio'}
+          </span>
+        </div>
+
+        <div className="control-bar-actions">
+          <span className={`toolbar-indicator ${toolbarState.kind}`}>{toolbarState.text}</span>
+
+          {page === 'main' ? (
+            <>
+              <button className="toolbar-chip" onClick={() => void copyOutput()}>
+                Copy
+              </button>
+              <button className="toolbar-chip" disabled={!previousInput} onClick={undoLastChange}>
+                Undo
+              </button>
+              <button
+                className="toolbar-chip toolbar-chip-primary"
+                disabled={busy || loading}
+                onClick={() => void runTask('auto_process')}
+              >
+                Improve
+              </button>
+              <button className="toolbar-chip" onClick={() => setPage('settings')}>
+                Settings
+              </button>
+            </>
+          ) : (
+            <button className="toolbar-chip" onClick={() => setPage('main')}>
+              Back
+            </button>
+          )}
         </div>
       </header>
 
-      <section className="panel settings-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>Settings</h2>
-            <p>These values are managed by the Rust service and saved in your local config folder.</p>
-          </div>
-          {loading ? <span className="badge muted">Loading</span> : <span className="badge">Ready</span>}
-        </div>
+      <div className="app-shell">
+        {page === 'settings' ? (
+          <section className="panel settings-panel">
+            <div className="panel-heading">
+              <div>
+                <h2 data-index="01">Model Parameters</h2>
+                <p>Managed by the Rust service and saved in your local config folder.</p>
+              </div>
+              {loading ? (
+                <span className="badge muted">Loading</span>
+              ) : (
+                <span className="badge">Ready</span>
+              )}
+            </div>
 
-        <div className="settings-grid">
-          <label>
-            <span>OpenAI API key</span>
-            <input
-              type="password"
-              value={config.api_key}
-              onChange={(event) =>
-                setConfig((current) => ({ ...current, api_key: event.target.value }))
-              }
-              onBlur={() => void persistConfig(config)}
-              placeholder="sk-..."
+            <div className="settings-grid">
+              <label>
+                <span>OpenAI API key</span>
+                <input
+                  type="password"
+                  value={config.api_key}
+                  onChange={(event) =>
+                    setConfig((current) => ({ ...current, api_key: event.target.value }))
+                  }
+                  onBlur={() => void persistConfig(config)}
+                  placeholder="sk-..."
+                />
+              </label>
+
+              <label>
+                <span>Model</span>
+                <input
+                  type="text"
+                  value={config.model}
+                  onChange={(event) =>
+                    setConfig((current) => ({ ...current, model: event.target.value }))
+                  }
+                  onBlur={() => void persistConfig(config)}
+                  placeholder="gpt-4.1-mini"
+                />
+              </label>
+            </div>
+          </section>
+        ) : (
+          <div className="main-body">
+            <textarea
+              className="main-textarea"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  event.preventDefault()
+                  void runTask('auto_process')
+                }
+              }}
+              placeholder="Paste or write something. Press ⌘↵ to improve it."
             />
-          </label>
 
-          <label>
-            <span>Model</span>
-            <input
-              type="text"
-              value={config.model}
-              onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
-              onBlur={() => void persistConfig(config)}
-              placeholder="gpt-4.1-mini"
-            />
-          </label>
-        </div>
-      </section>
-
-      <section className="panel actions-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>Action</h2>
-            <p>One input box, one AI action. The model decides whether to translate or polish.</p>
+            <div className="main-footer">
+              {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
+            </div>
           </div>
-          <div className={`status ${status.kind}`}>{status.text}</div>
-        </div>
+        )}
+      </div>
 
-        <div className="action-row">
-          <button disabled={busy || loading} onClick={() => void runTask('auto_process')}>
-            Improve Text
-          </button>
-          <button className="secondary" disabled={busy || !previousInput} onClick={undoLastChange}>
-            Undo
-          </button>
-          <button className="secondary" disabled={busy} onClick={() => void copyOutput()}>
-            Copy Text
-          </button>
-        </div>
-      </section>
+      {showQuickTranslateOverlay ? (
+        <div className="popup-overlay" onClick={closeQuickTranslateOverlay}>
+          <div
+            className={`popup-overlay-dialog popup-frame${isMac ? ' macos-frame' : ''}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="popup-bar">
+              <span className="popup-bar-title">Quick Translate</span>
+              <div className="popup-bar-actions">
+                <button className="toolbar-chip" onClick={closeQuickTranslateOverlay}>
+                  Close
+                </button>
+              </div>
+            </header>
 
-      <article className="panel editor-panel single-editor">
-        <div className="panel-heading">
-          <div>
-            <h2>Text</h2>
-            <p>Paste Chinese or English text here. Processing replaces the text in this same box.</p>
+            <div className="popup-shell">
+              <textarea
+                ref={overlayInputRef}
+                className="popup-textarea"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    closeQuickTranslateOverlay()
+                  }
+
+                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                    event.preventDefault()
+                    void runTask('auto_process')
+                  }
+                }}
+                placeholder="Paste or type text to improve…"
+              />
+            </div>
+
+            <footer className="popup-footer">
+              <div className="popup-footer-status">
+                {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
+              </div>
+              <div className="popup-footer-actions">
+                <button className="toolbar-chip" disabled={!previousInput} onClick={undoLastChange}>
+                  Undo
+                </button>
+                <button className="toolbar-chip" onClick={() => void copyOutput()}>
+                  Copy
+                </button>
+                <button
+                  className="toolbar-chip toolbar-chip-primary"
+                  disabled={busy || loading}
+                  onClick={() => void runTask('auto_process')}
+                >
+                  Improve
+                </button>
+              </div>
+            </footer>
           </div>
         </div>
-        <textarea
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="If the text is Chinese, it will be translated into English. If it is English, it will be polished."
-        />
-      </article>
+      ) : null}
     </div>
+  )
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M9.75 3.75 5.5 8l4.25 4.25" />
+    </svg>
+  )
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6.25 3.75 10.5 8l-4.25 4.25" />
+    </svg>
   )
 }
 

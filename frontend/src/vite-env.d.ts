@@ -22,5 +22,6 @@ interface Window {
     saveConfig: (config: LinguaFixConfig) => Promise<LinguaFixConfig>
     processText: (request: LinguaFixProcessRequest) => Promise<LinguaFixProcessResponse>
     hidePopup: () => Promise<void>
+    onShowQuickTranslateOverlay: (callback: () => void) => () => void
   }
 }

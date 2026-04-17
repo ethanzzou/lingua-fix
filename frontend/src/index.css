@@ -1,18 +1,28 @@
 :root {
-  font-family:
-    "Instrument Sans",
-    "Inter",
-    "Segoe UI",
-    sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #dbe7e6;
-  background:
-    radial-gradient(circle at top left, rgba(58, 116, 108, 0.26), transparent 34%),
-    radial-gradient(circle at top right, rgba(34, 81, 120, 0.28), transparent 32%),
-    linear-gradient(180deg, #0d181d 0%, #101d23 100%);
+  --paper: #efe7d5;
+  --paper-deep: #e5dcc6;
+  --paper-soft: #f5efe0;
+  --ink: #1b1713;
+  --ink-soft: #4e463c;
+  --ink-muted: #8a806f;
+  --rule: rgba(27, 23, 19, 0.14);
+  --rule-soft: rgba(27, 23, 19, 0.07);
+  --accent: #a8392b;
+  --accent-soft: rgba(168, 57, 43, 0.09);
+  --ok: #3f6b43;
+  --warn: #b08a2e;
+
+  --serif: "Fraunces", "Iowan Old Style", "Georgia", serif;
+  --sans: "Instrument Sans", "Helvetica Neue", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  text-rendering: geometricPrecision;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -24,9 +34,28 @@
 body {
   margin: 0;
   min-width: 320px;
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(168, 57, 43, 0.07), transparent 60%),
+    radial-gradient(900px 500px at -5% 105%, rgba(27, 23, 19, 0.06), transparent 60%),
+    var(--paper);
+  position: relative;
+}
+
+/* Paper grain — a whisper of texture so it doesn't read as flat CSS. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.28;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.5 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
 
 #root {
+  position: relative;
+  z-index: 1;
   min-height: 100vh;
 }
 
@@ -37,25 +66,34 @@ p {
 }
 
 h1 {
-  font-size: clamp(2.6rem, 4vw, 4.6rem);
-  line-height: 0.96;
-  letter-spacing: -0.05em;
-  color: #f1fbfb;
-  margin-bottom: 14px;
+  font-family: var(--serif);
+  font-weight: 420;
+  font-size: clamp(3rem, 6vw, 5.4rem);
+  line-height: 0.95;
+  letter-spacing: -0.045em;
+  color: var(--ink);
 }
 
 h2 {
-  font-size: 1.1rem;
-  color: #effafa;
-  margin-bottom: 6px;
+  font-family: var(--serif);
+  font-weight: 520;
+  font-size: 1.4rem;
+  letter-spacing: -0.012em;
+  color: var(--ink);
 }
 
 p {
-  color: #a9c0c0;
+  color: var(--ink-soft);
+  line-height: 1.6;
 }
 
 input,
 textarea,
 button {
-  font: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--paper);
 }

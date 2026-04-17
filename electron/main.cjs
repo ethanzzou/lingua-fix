@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const process = require('node:process');
@@ -7,13 +7,22 @@ const fs = require('node:fs');
 const SERVICE_PORT = Number(process.env.LINGUAFIX_PORT || 8787);
 const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
 const QUICK_TRANSLATE_HOTKEY = 'CommandOrControl+Shift+L';
+const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
 
 let mainWindow = null;
 let popupWindow = null;
+let popupIgnoreBlurUntil = 0;
+let popupHelperProcess = null;
 let serviceProcess = null;
+let ownsServiceProcess = false;
+let isQuitting = false;
 
 function isDev() {
   return !app.isPackaged;
+}
+
+function isPopupHelperProcess() {
+  return APP_ROLE === 'popup-helper';
 }
 
 function resolveRustCommand() {
@@ -43,6 +52,15 @@ function resolveRustCommand() {
   };
 }
 
+async function isServiceHealthy() {
+  try {
+    const response = await fetch(`${SERVICE_URL}/health`);
+    return response.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
 function startRustService() {
   if (serviceProcess) {
     return;
@@ -57,9 +75,11 @@ function startRustService() {
     },
     stdio: 'inherit',
   });
+  ownsServiceProcess = true;
 
   serviceProcess.on('exit', () => {
     serviceProcess = null;
+    ownsServiceProcess = false;
   });
 }
 
@@ -67,19 +87,23 @@ async function waitForService() {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < 30000) {
-    try {
-      const response = await fetch(`${SERVICE_URL}/health`);
-      if (response.ok) {
-        return;
-      }
-    } catch (_) {
-      // The service is still starting up.
+    if (await isServiceHealthy()) {
+      return;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
 
   throw new Error('Rust service did not start within 30 seconds.');
+}
+
+async function ensureRustService() {
+  if (await isServiceHealthy()) {
+    return;
+  }
+
+  startRustService();
+  await waitForService();
 }
 
 async function callService(pathname, options = {}) {
@@ -124,6 +148,63 @@ function loadRenderer(window, search = '') {
   window.loadFile(target.filePath, { search: target.search });
 }
 
+function resolvePopupHelperLaunch() {
+  if (isDev()) {
+    return {
+      command: process.execPath,
+      args: [app.getAppPath()],
+      cwd: app.getAppPath(),
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [],
+    cwd: path.dirname(process.execPath),
+  };
+}
+
+function startPopupHelperProcess() {
+  if (isPopupHelperProcess()) {
+    return;
+  }
+
+  if (popupHelperProcess && !popupHelperProcess.killed) {
+    return;
+  }
+
+  const helper = resolvePopupHelperLaunch();
+  popupHelperProcess = spawn(helper.command, helper.args, {
+    cwd: helper.cwd,
+    env: {
+      ...process.env,
+      LINGUAFIX_APP_ROLE: 'popup-helper',
+      LINGUAFIX_PORT: String(SERVICE_PORT),
+    },
+    stdio: isDev() ? 'inherit' : 'ignore',
+  });
+
+  popupHelperProcess.on('exit', () => {
+    popupHelperProcess = null;
+
+    if (!isQuitting) {
+      setTimeout(() => {
+        if (!isQuitting) {
+          startPopupHelperProcess();
+        }
+      }, 1000);
+    }
+  });
+}
+
+function stopPopupHelperProcess() {
+  if (popupHelperProcess && !popupHelperProcess.killed) {
+    popupHelperProcess.kill();
+  }
+
+  popupHelperProcess = null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -131,7 +212,8 @@ function createWindow() {
     minWidth: 980,
     minHeight: 720,
     title: 'LinguaFix',
-    backgroundColor: '#132227',
+    backgroundColor: '#efe7d5',
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -144,6 +226,21 @@ function createWindow() {
   if (isDev()) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+function positionPopupWindowNearCurrentDisplay(window) {
+  const cursorPoint = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursorPoint);
+  const workArea = display.workArea;
+  const [windowWidth, windowHeight] = window.getSize();
+  const x = Math.round(workArea.x + (workArea.width - windowWidth) / 2);
+  const y = Math.round(workArea.y + Math.max(48, (workArea.height - windowHeight) / 5));
+
+  window.setPosition(x, y);
 }
 
 function createPopupWindow() {
@@ -158,13 +255,20 @@ function createPopupWindow() {
     minHeight: 460,
     show: false,
     title: 'Quick Translate',
-    backgroundColor: '#132227',
+    backgroundColor: '#efe7d5',
+    ...(process.platform === 'darwin'
+      ? {
+          titleBarStyle: 'hiddenInset',
+          type: 'panel',
+        }
+      : {}),
+    acceptFirstMouse: true,
     autoHideMenuBar: true,
     maximizable: false,
     minimizable: false,
     resizable: true,
     fullscreenable: false,
-    alwaysOnTop: true,
+    skipTaskbar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -172,9 +276,24 @@ function createPopupWindow() {
     },
   });
 
+  if (process.platform === 'darwin') {
+    popupWindow.setHiddenInMissionControl(true);
+    popupWindow.setAlwaysOnTop(true, 'floating');
+    popupWindow.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: true,
+    });
+  } else {
+    popupWindow.setAlwaysOnTop(true);
+  }
+
   loadRenderer(popupWindow, { popup: 'quick-translate' });
 
   popupWindow.on('blur', () => {
+    if (Date.now() < popupIgnoreBlurUntil) {
+      return;
+    }
+
     if (popupWindow && !popupWindow.isDestroyed()) {
       popupWindow.hide();
     }
@@ -182,24 +301,50 @@ function createPopupWindow() {
 
   popupWindow.on('closed', () => {
     popupWindow = null;
+    popupIgnoreBlurUntil = 0;
   });
 
   return popupWindow;
 }
 
+function hideQuickTranslatePopup() {
+  if (popupWindow && !popupWindow.isDestroyed()) {
+    popupWindow.hide();
+  }
+}
+
 function showQuickTranslatePopup() {
   const window = createPopupWindow();
 
-  if (!window.isVisible()) {
-    window.show();
+  if (window.isMinimized()) {
+    window.restore();
   }
 
-  window.focus();
+  positionPopupWindowNearCurrentDisplay(window);
+  popupIgnoreBlurUntil = Date.now() + 1000;
+  window.show();
+  window.moveTop();
+
+  if (process.platform !== 'darwin') {
+    window.focus();
+  }
+}
+
+function toggleQuickTranslatePopup() {
+  const window = createPopupWindow();
+
+  if (window.isVisible()) {
+    popupIgnoreBlurUntil = 0;
+    hideQuickTranslatePopup();
+    return;
+  }
+
+  showQuickTranslatePopup();
 }
 
 function registerGlobalHotkeys() {
   globalShortcut.register(QUICK_TRANSLATE_HOTKEY, () => {
-    showQuickTranslatePopup();
+    toggleQuickTranslatePopup();
   });
 }
 
@@ -217,35 +362,53 @@ ipcMain.handle('linguafix:process-text', async (_event, request) =>
   }),
 );
 ipcMain.handle('linguafix:hide-popup', async () => {
-  if (popupWindow && !popupWindow.isDestroyed()) {
-    popupWindow.hide();
-  }
+  hideQuickTranslatePopup();
 });
 
 app.whenReady().then(async () => {
-  startRustService();
-  await waitForService();
+  if (isPopupHelperProcess() && process.platform === 'darwin') {
+    app.setActivationPolicy('accessory');
+  }
+
+  await ensureRustService();
+
+  if (isPopupHelperProcess()) {
+    createPopupWindow();
+    registerGlobalHotkeys();
+    return;
+  }
+
   createWindow();
-  createPopupWindow();
-  registerGlobalHotkeys();
+  startPopupHelperProcess();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
       createWindow();
     }
+
+    startPopupHelperProcess();
   });
 });
 
 app.on('window-all-closed', () => {
+  if (isPopupHelperProcess()) {
+    return;
+  }
+
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   globalShortcut.unregisterAll();
 
-  if (serviceProcess) {
+  if (!isPopupHelperProcess()) {
+    stopPopupHelperProcess();
+  }
+
+  if (ownsServiceProcess && serviceProcess) {
     serviceProcess.kill();
   }
 });
