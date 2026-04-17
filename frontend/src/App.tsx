@@ -48,6 +48,15 @@ function App() {
       return
     }
 
+    const unsubscribe = window.linguafix.onPopulateQuickTranslateInput((text) => {
+      setInput(text)
+      setStatus({ kind: 'idle', text: '' })
+      window.setTimeout(() => {
+        popupInputRef.current?.focus()
+        popupInputRef.current?.setSelectionRange(text.length, text.length)
+      }, 0)
+    })
+
     popupInputRef.current?.focus()
 
     const handleVisibility = () => {
@@ -55,7 +64,10 @@ function App() {
     }
 
     window.addEventListener('focus', handleVisibility)
-    return () => window.removeEventListener('focus', handleVisibility)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('focus', handleVisibility)
+    }
   }, [isQuickTranslatePopup])
 
   useEffect(() => {

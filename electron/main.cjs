@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, screen } = require('electron');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const process = require('node:process');
@@ -6,7 +6,7 @@ const fs = require('node:fs');
 
 const SERVICE_PORT = Number(process.env.LINGUAFIX_PORT || 8787);
 const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
-const QUICK_TRANSLATE_HOTKEY = 'CommandOrControl+Shift+L';
+const QUICK_TRANSLATE_HOTKEY = 'Control+Shift+L';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
 
 let mainWindow = null;
@@ -313,7 +313,70 @@ function hideQuickTranslatePopup() {
   }
 }
 
-function showQuickTranslatePopup() {
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: 'ignore',
+      ...options,
+    });
+
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Command exited with code ${code ?? 'unknown'}.`));
+    });
+  });
+}
+
+async function triggerSystemCopyShortcut() {
+  if (process.platform === 'darwin') {
+    await runCommand('osascript', [
+      '-e',
+      'tell application "System Events" to keystroke "c" using {command down}',
+    ]);
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    await runCommand('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^c")',
+    ]);
+    return;
+  }
+
+  await runCommand('xdotool', ['key', '--clearmodifiers', 'ctrl+c']);
+}
+
+async function readSelectedTextOrClipboard() {
+  const clipboardBefore = clipboard.readText();
+
+  try {
+    await triggerSystemCopyShortcut();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    const selectedText = clipboard.readText().trim();
+
+    if (selectedText) {
+      if (selectedText !== clipboardBefore) {
+        clipboard.writeText(clipboardBefore);
+      }
+
+      return selectedText;
+    }
+  } catch (_) {
+    // Fall back to the existing clipboard contents.
+  }
+
+  return clipboardBefore.trim();
+}
+
+function showQuickTranslatePopup(initialText = '') {
   const window = createPopupWindow();
 
   if (window.isMinimized()) {
@@ -324,6 +387,7 @@ function showQuickTranslatePopup() {
   popupIgnoreBlurUntil = Date.now() + 1000;
   window.show();
   window.moveTop();
+  window.webContents.send('linguafix:populate-quick-translate-input', initialText);
 
   if (process.platform !== 'darwin') {
     window.focus();
@@ -343,8 +407,17 @@ function toggleQuickTranslatePopup() {
 }
 
 function registerGlobalHotkeys() {
-  globalShortcut.register(QUICK_TRANSLATE_HOTKEY, () => {
-    toggleQuickTranslatePopup();
+  globalShortcut.register(QUICK_TRANSLATE_HOTKEY, async () => {
+    const window = createPopupWindow();
+
+    if (window.isVisible()) {
+      popupIgnoreBlurUntil = 0;
+      hideQuickTranslatePopup();
+      return;
+    }
+
+    const initialText = await readSelectedTextOrClipboard();
+    showQuickTranslatePopup(initialText);
   });
 }
 
