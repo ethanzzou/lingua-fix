@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Notification, screen } = require('electron');
+const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, screen, Tray } = require('electron');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -24,6 +24,7 @@ let serviceProcess = null;
 let ownsServiceProcess = false;
 let isQuitting = false;
 let isRunningSelectionReplace = false;
+let statusBarItem = null;
 
 function isDev() {
   return !app.isPackaged;
@@ -547,6 +548,20 @@ function createWindow() {
   });
 }
 
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
+}
+
 function positionPopupWindowNearCurrentDisplay(window) {
   const cursorPoint = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursorPoint);
@@ -667,6 +682,106 @@ function registerGlobalHotkeys() {
   });
 }
 
+function resolveStatusBarIconPath() {
+  if (isDev()) {
+    return path.join(app.getAppPath(), 'electron', 'assets', 'statusbarTemplate.png');
+  }
+
+  return path.join(process.resourcesPath, 'statusbarTemplate.png');
+}
+
+function resolveAppIconPath() {
+  if (isDev()) {
+    return path.join(app.getAppPath(), 'electron', 'assets', 'linguafix-app-icon-v2-512.png');
+  }
+
+  return path.join(process.resourcesPath, 'linguafix-app-icon-v2-512.png');
+}
+
+function setDockIcon() {
+  if (process.platform !== 'darwin' || isPopupHelperProcess()) {
+    return;
+  }
+
+  const icon = nativeImage.createFromPath(resolveAppIconPath());
+
+  if (icon.isEmpty() || !app.dock) {
+    return;
+  }
+
+  app.dock.setIcon(icon);
+}
+
+function buildStatusBarMenu() {
+  return Menu.buildFromTemplate([
+    {
+      label: 'Open LinguaFix',
+      click: () => {
+        showMainWindow();
+      },
+    },
+    {
+      label: 'Quick Translate',
+      click: () => {
+        showQuickTranslatePopup();
+      },
+    },
+    {
+      label: 'Process Selected Text',
+      click: async () => {
+        await tryProcessSelectedTextInPlace();
+      },
+    },
+    {
+      type: 'separator',
+    },
+    {
+      label: 'Quit',
+      click: () => {
+        app.quit();
+      },
+    },
+  ]);
+}
+
+function createStatusBarItem() {
+  if (process.platform !== 'darwin' || isPopupHelperProcess()) {
+    return;
+  }
+
+  if (statusBarItem) {
+    return;
+  }
+
+  let icon = nativeImage.createFromPath(resolveStatusBarIconPath());
+  const hasIcon = !icon.isEmpty();
+
+  if (!hasIcon) {
+    icon = nativeImage.createEmpty();
+  }
+
+  statusBarItem = new Tray(icon.resize({ height: 20 }));
+  statusBarItem.setToolTip('LinguaFix');
+
+  if (!hasIcon) {
+    statusBarItem.setTitle('LF');
+  }
+
+  statusBarItem.setContextMenu(buildStatusBarMenu());
+  statusBarItem.on('click', () => {
+    statusBarItem.popUpContextMenu();
+  });
+}
+
+function destroyStatusBarItem() {
+  if (!statusBarItem) {
+    return;
+  }
+
+  statusBarItem.destroy();
+  statusBarItem = null;
+}
+
 ipcMain.handle('linguafix:get-config', async () => callService('/config'));
 ipcMain.handle('linguafix:save-config', async (_event, config) =>
   callService('/config', {
@@ -712,12 +827,23 @@ app.whenReady().then(async () => {
     app.setActivationPolicy('accessory');
   }
 
-  await ensureRustService();
-
   if (isPopupHelperProcess()) {
+    await ensureRustService();
     createPopupWindow();
     registerGlobalHotkeys();
     return;
+  }
+
+  setDockIcon();
+  createStatusBarItem();
+  try {
+    await ensureRustService();
+  } catch (error) {
+    notify(
+      error instanceof Error
+        ? error.message
+        : 'Rust service could not be started.',
+    );
   }
 
   createWindow();
@@ -745,6 +871,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
+  destroyStatusBarItem();
 
   if (!isPopupHelperProcess()) {
     stopPopupHelperProcess();

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="160" x2="864" y1="120" y2="904" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fcfdff"/>
+      <stop offset="1" stop-color="#eef1f5"/>
+    </linearGradient>
+    <radialGradient id="blueGlow" cx="0" cy="0" r="1" gradientTransform="translate(792 228) rotate(131.273) scale(360 340)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7eaef8" stop-opacity=".58"/>
+      <stop offset=".48" stop-color="#4b86ec" stop-opacity=".20"/>
+      <stop offset="1" stop-color="#4b86ec" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="inkGlow" cx="0" cy="0" r="1" gradientTransform="translate(234 842) rotate(35.395) scale(332 280)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b2230" stop-opacity=".14"/>
+      <stop offset="1" stop-color="#1b2230" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="paperPane" x1="224" x2="806" y1="196" y2="852" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".88"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity=".42"/>
+    </linearGradient>
+    <linearGradient id="blueCard" x1="440" x2="774" y1="214" y2="652" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#63a2ff"/>
+      <stop offset=".56" stop-color="#2b6de5"/>
+      <stop offset="1" stop-color="#1d4fae"/>
+    </linearGradient>
+    <linearGradient id="bridge" x1="372" x2="704" y1="594" y2="402" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".98"/>
+      <stop offset=".58" stop-color="#ffffff" stop-opacity=".94"/>
+      <stop offset="1" stop-color="#dfeaff" stop-opacity=".92"/>
+    </linearGradient>
+    <filter id="shadowSoft" x="130" y="146" width="764" height="786" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" result="hardAlpha" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0"/>
+      <feOffset dy="26"/>
+      <feGaussianBlur stdDeviation="28"/>
+      <feColorMatrix values="0 0 0 0 0.0588235 0 0 0 0 0.0901961 0 0 0 0 0.164706 0 0 0 0.16 0"/>
+      <feBlend in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+    <filter id="shadowTight" x="220" y="166" width="594" height="650" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" result="hardAlpha" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0"/>
+      <feOffset dy="14"/>
+      <feGaussianBlur stdDeviation="18"/>
+      <feColorMatrix values="0 0 0 0 0.0588235 0 0 0 0 0.0901961 0 0 0 0 0.164706 0 0 0 0.18 0"/>
+      <feBlend in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="248" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="248" fill="url(#blueGlow)"/>
+  <rect width="1024" height="1024" rx="248" fill="url(#inkGlow)"/>
+
+  <g filter="url(#shadowSoft)">
+    <rect x="112" y="112" width="800" height="800" rx="212" fill="url(#paperPane)"/>
+    <rect x="112.5" y="112.5" width="799" height="799" rx="211.5" fill="none" stroke="#17181c" stroke-opacity=".08"/>
+  </g>
+
+  <g filter="url(#shadowTight)">
+    <circle cx="512" cy="512" r="276" fill="#ffffff" fill-opacity=".56"/>
+    <circle cx="512" cy="512" r="275.5" fill="none" stroke="#ffffff" stroke-opacity=".65"/>
+
+    <g transform="rotate(-11 386 544)">
+      <rect x="224" y="304" width="324" height="404" rx="96" fill="#17181c"/>
+      <rect x="224.5" y="304.5" width="323" height="403" rx="95.5" fill="none" stroke="#ffffff" stroke-opacity=".10"/>
+      <text x="386" y="565" fill="#f8fafc" font-family="PingFang SC, Noto Sans CJK SC, Hiragino Sans GB, sans-serif" font-size="168" font-weight="600" text-anchor="middle">文</text>
+    </g>
+
+    <g transform="rotate(12 638 462)">
+      <rect x="476" y="260" width="324" height="404" rx="96" fill="url(#blueCard)"/>
+      <rect x="476.5" y="260.5" width="323" height="403" rx="95.5" fill="none" stroke="#ffffff" stroke-opacity=".18"/>
+      <text x="638" y="520" fill="#ffffff" font-family="Instrument Sans, SF Pro Display, Helvetica Neue, sans-serif" font-size="200" font-weight="700" text-anchor="middle">A</text>
+    </g>
+  </g>
+
+  <path d="M365 633c58-4 105-25 145-64 39-38 66-84 130-120 30-17 63-29 97-35l15 51c-45 8-81 23-114 47-34 24-58 55-87 91-46 58-105 93-178 102l-8-72Z" fill="url(#bridge)"/>
+  <path d="M360 642c58-4 105-25 145-64 39-38 66-84 130-120 30-17 63-29 97-35" fill="none" stroke="#d6e6ff" stroke-linecap="round" stroke-opacity=".56" stroke-width="14"/>
+
+  <g fill="#ffffff">
+    <path d="M734 254l17 41 41 17-41 17-17 41-17-41-41-17 41-17 17-41Z"/>
+    <path d="M295 731l10 24 24 10-24 10-10 24-10-24-24-10 24-10 10-24Z" fill-opacity=".72"/>
+  </g>
+
+  <rect x="116" y="116" width="792" height="792" rx="208" fill="none" stroke="#ffffff" stroke-opacity=".58" stroke-width="8"/>
+</svg>

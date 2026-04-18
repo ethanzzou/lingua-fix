@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="332" x2="706" y1="230" y2="792" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#90b2fb"/>
+      <stop offset=".48" stop-color="#668be7"/>
+      <stop offset="1" stop-color="#4065c5"/>
+    </linearGradient>
+    <linearGradient id="tileGloss" x1="388" x2="594" y1="252" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".26"/>
+      <stop offset=".4" stop-color="#fff" stop-opacity=".1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="page" x1="400" x2="648" y1="302" y2="704" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="1" stop-color="#f5f8fe"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(512 512) scale(1.5) translate(-512 -512)">
+    <g transform="translate(0 10)">
+      <rect x="232" y="222" width="560" height="560" rx="120" fill="url(#tile)"/>
+      <path d="M300 280c52-46 126-70 210-70 114 0 188 36 238 108v58c-60-66-138-100-244-100-78 0-142 12-204 34v-30Z" fill="url(#tileGloss)"/>
+      <rect x="232.5" y="222.5" width="559" height="559" rx="119.5" fill="none" stroke="#ffffff" stroke-opacity=".11"/>
+    </g>
+
+    <g transform="translate(0 30)">
+      <g transform="translate(536 500) scale(0.99 0.76) translate(-536 -500)">
+      <path d="M386 274c0-29.82 24.18-54 54-54h127.58c20.64 0 40.43 8.2 55.02 22.79l40.61 40.61C677.8 298 686 317.79 686 338.42V698c0 29.82-24.18 54-54 54H440c-29.82 0-54-24.18-54-54V274Z" fill="url(#page)"/>
+      <path d="M386.5 274c0-29.55 23.95-53.5 53.5-53.5h127.58c20.51 0 40.18 8.15 54.67 22.65l40.61 40.61c14.5 14.49 22.64 34.16 22.64 54.66V698c0 29.55-23.95 53.5-53.5 53.5H440c-29.55 0-53.5-23.95-53.5-53.5V274Z" fill="none" stroke="#d9e2f4" stroke-opacity=".74"/>
+      <path d="M568 220v92c0 24.3 19.7 44 44 44h74" fill="#dde6f8"/>
+      <path d="M568 220v91.5c0 24.3 19.7 44 44 44h73.5" fill="none" stroke="#ccd8f1"/>
+      <rect x="434" y="388" width="132" height="28" rx="14" fill="#476fd4" fill-opacity=".94"/>
+      <rect x="428" y="458" width="194" height="28" rx="14" fill="#476fd4" fill-opacity=".9"/>
+      <path d="M430 576h122c34 0 61-13 80-40l14-20c8-11 23-13 34-5 11 8 13 23 5 34l-14 19c-30 41-69 62-119 62H430c-16 0-28-11-28-25s12-25 28-25Z" fill="#476fd4"/>
+      </g>
+    </g>
+  </g>
+</svg>
