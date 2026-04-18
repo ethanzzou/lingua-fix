@@ -247,6 +247,34 @@
   color: var(--ink-muted);
 }
 
+.history-card-meta-primary,
+.history-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-card-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.history-bookmark-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
 .history-card-copy {
   display: grid;
   gap: 12px;
@@ -277,11 +305,17 @@
 
 .history-page {
   gap: 18px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.history-page::-webkit-scrollbar {
+  display: none;
 }
 
 .history-controls {
   display: grid;
-  grid-template-columns: minmax(0, 2.2fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 2.2fr) repeat(5, minmax(0, 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -330,6 +364,8 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
 }
 
 .history-summary,
@@ -378,6 +414,12 @@
   max-height: none;
   overflow-y: auto;
   padding-right: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.history-list-page::-webkit-scrollbar {
+  display: none;
 }
 
 .history-card-page {

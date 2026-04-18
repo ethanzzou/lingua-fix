@@ -19,6 +19,7 @@ type HistoryRecord = {
   original_text: string
   translated_text: string
   created_at: number
+  is_bookmarked: boolean
   tags: string[]
 }
 
@@ -35,6 +36,7 @@ type HistoryPagination = {
 }
 
 type HistorySort = 'newest' | 'oldest'
+type BookmarkStatusFilter = 'all' | 'bookmarked' | 'unbookmarked'
 
 type GroupMode = 'none' | 'day' | 'week' | 'month'
 
@@ -43,6 +45,7 @@ type HistoryQuery = {
   page_size: number
   search: string
   tag: string
+  bookmark_status: BookmarkStatusFilter
   sort: HistorySort
 }
 
@@ -59,15 +62,20 @@ const PROVIDER_LABELS: Record<Provider, string> = {
 const PROVIDER_KEY_LABELS: Record<Provider, string> = {
   open_ai: 'OpenAI API key',
   gemini_ai_studio: 'Google AI Studio API key',
-  gemini_vertex: 'OAuth access token',
+  gemini_vertex: 'Google Cloud API key or OAuth access token',
   custom_open_ai: 'API key',
 }
 
 const PROVIDER_KEY_PLACEHOLDERS: Record<Provider, string> = {
   open_ai: 'sk-...',
   gemini_ai_studio: 'AIza...',
-  gemini_vertex: 'gcloud auth print-access-token',
+  gemini_vertex: 'AIza... or gcloud auth print-access-token',
   custom_open_ai: 'API key',
+}
+
+const PROVIDER_KEY_HINTS: Partial<Record<Provider, string>> = {
+  gemini_vertex:
+    'Vertex accepts a Google Cloud API key or an OAuth token. AI Studio API keys do not work here.',
 }
 
 const PROVIDER_MODEL_PLACEHOLDERS: Record<Provider, string> = {
@@ -87,7 +95,7 @@ const PROVIDER_BASE_URL_PLACEHOLDERS: Record<Provider, string> = {
 
 const PROVIDER_BASE_URL_HINTS: Partial<Record<Provider, string>> = {
   gemini_vertex:
-    'Optional. Leave this blank to use your active gcloud project and the global Vertex endpoint.',
+    'Optional. Leave this blank to use your active gcloud project, or the global express-mode endpoint when using only a Vertex API key.',
   custom_open_ai:
     'Required for deployed Model Garden OpenAI-compatible endpoints and other OpenAI-style APIs.',
 }
@@ -108,6 +116,7 @@ const DEFAULT_HISTORY_QUERY: HistoryQuery = {
   page_size: 12,
   search: '',
   tag: '',
+  bookmark_status: 'all',
   sort: 'newest',
 }
 
@@ -161,6 +170,8 @@ function App() {
         page_size: nextQuery.page_size,
         search: nextQuery.search || undefined,
         tag: nextQuery.tag || undefined,
+        bookmark_status:
+          nextQuery.bookmark_status === 'all' ? undefined : nextQuery.bookmark_status,
         sort: nextQuery.sort,
       })
 
@@ -329,15 +340,20 @@ function App() {
     }
   }
 
-  async function deleteHistoryRecord(id: number) {
+  async function deleteHistoryRecord(record: HistoryRecord) {
+    if (record.is_bookmarked) {
+      setStatus({ kind: 'error', text: 'Remove the bookmark before deleting this history record.' })
+      return
+    }
+
     if (!window.confirm('Delete this history record?')) {
       return
     }
 
-    setHistoryBusyIds((current) => [...current, id])
+    setHistoryBusyIds((current) => [...current, record.id])
 
     try {
-      await window.linguafix.deleteHistoryRecord(id)
+      await window.linguafix.deleteHistoryRecord(record.id)
       setHistoryLoading(true)
       const ok = await loadHistory(historyQuery)
       if (!ok) {
@@ -345,7 +361,7 @@ function App() {
       }
       setHistoryTagDrafts((current) => {
         const nextDrafts = { ...current }
-        delete nextDrafts[id]
+        delete nextDrafts[record.id]
         return nextDrafts
       })
       setStatus({ kind: 'success', text: 'History record deleted.' })
@@ -353,7 +369,7 @@ function App() {
       const message = error instanceof Error ? error.message : 'Could not delete history record.'
       setStatus({ kind: 'error', text: message })
     } finally {
-      setHistoryBusyIds((current) => current.filter((value) => value !== id))
+      setHistoryBusyIds((current) => current.filter((value) => value !== record.id))
     }
   }
 
@@ -362,7 +378,7 @@ function App() {
       return
     }
 
-    if (!window.confirm('Delete all saved history records?')) {
+    if (!window.confirm('Delete all unbookmarked history records? Bookmarked items will be kept.')) {
       return
     }
 
@@ -376,7 +392,7 @@ function App() {
         return
       }
       setHistoryTagDrafts({})
-      setStatus({ kind: 'success', text: 'History cleared.' })
+      setStatus({ kind: 'success', text: 'Unbookmarked history cleared. Bookmarks kept.' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not clear history.'
       setStatus({ kind: 'error', text: message })
@@ -446,6 +462,29 @@ function App() {
       setStatus({ kind: 'error', text: message })
     } finally {
       setHistoryBusyIds((current) => current.filter((value) => value !== id))
+    }
+  }
+
+  async function toggleHistoryBookmark(record: HistoryRecord) {
+    setHistoryBusyIds((current) => [...current, record.id])
+
+    try {
+      await window.linguafix.setHistoryRecordBookmark(record.id, !record.is_bookmarked)
+      setHistoryLoading(true)
+      const ok = await loadHistory(historyQuery)
+      if (!ok) {
+        return
+      }
+      setStatus({
+        kind: 'success',
+        text: record.is_bookmarked ? 'Bookmark removed.' : 'History record bookmarked.',
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Could not update bookmark state.'
+      setStatus({ kind: 'error', text: message })
+    } finally {
+      setHistoryBusyIds((current) => current.filter((value) => value !== record.id))
     }
   }
 
@@ -743,6 +782,9 @@ function App() {
                   onBlur={() => void persistConfig(config)}
                   placeholder={PROVIDER_KEY_PLACEHOLDERS[config.provider]}
                 />
+                {PROVIDER_KEY_HINTS[config.provider] && (
+                  <small>{PROVIDER_KEY_HINTS[config.provider]}</small>
+                )}
               </label>
 
               <label>
@@ -787,7 +829,8 @@ function App() {
                 />
                 <small>
                   Translation logs are stored in <code>translations.sqlite3</code> in this
-                  directory. Entries older than 30 days are removed automatically.
+                  directory. Entries older than one year are removed automatically unless
+                  bookmarked.
                 </small>
               </label>
 
@@ -833,7 +876,7 @@ function App() {
             <div className="panel-heading">
               <div>
                 <h2 data-index="02">Translation History</h2>
-                <p>Browse, filter, paginate, group, tag, delete, or clear saved records.</p>
+                <p>Browse, filter, paginate, group, tag, bookmark, delete, or clear saved records.</p>
               </div>
               {historyLoading ? (
                 <span className="badge muted">Loading</span>
@@ -926,6 +969,23 @@ function App() {
                 </select>
               </label>
 
+              <label className="history-filter">
+                <span>Bookmark Status</span>
+                <select
+                  value={historyQuery.bookmark_status}
+                  onChange={(event) =>
+                    void applyHistoryQuery({
+                      page: 1,
+                      bookmark_status: event.target.value as BookmarkStatusFilter,
+                    })
+                  }
+                >
+                  <option value="all">All</option>
+                  <option value="bookmarked">Bookmarked</option>
+                  <option value="unbookmarked">Unbookmarked</option>
+                </select>
+              </label>
+
               <div className="history-page-actions">
                 <button className="toolbar-chip" type="submit">
                   Apply
@@ -950,7 +1010,7 @@ function App() {
                   disabled={historyLoading || historyClearing || historyPagination.total_records === 0}
                   onClick={() => void clearHistory()}
                 >
-                  Clear all records
+                  Clear unbookmarked
                 </button>
               </div>
             </form>
@@ -984,19 +1044,33 @@ function App() {
 
                       <div className="history-list history-list-page">
                         {group.records.map((record) => {
-                          const deleting = historyClearing || historyBusyIds.includes(record.id)
+                          const busy = historyClearing || historyBusyIds.includes(record.id)
 
                           return (
                             <article key={record.id} className="history-card history-card-page">
                               <div className="history-card-meta">
-                                <span>{formatHistoryTimestamp(record.created_at)}</span>
-                                <button
-                                  className="toolbar-chip toolbar-chip-danger"
-                                  disabled={deleting}
-                                  onClick={() => void deleteHistoryRecord(record.id)}
-                                >
-                                  Delete
-                                </button>
+                                <div className="history-card-meta-primary">
+                                  <span>{formatHistoryTimestamp(record.created_at)}</span>
+                                  {record.is_bookmarked ? (
+                                    <span className="history-bookmark-badge">Bookmarked</span>
+                                  ) : null}
+                                </div>
+                                <div className="history-card-actions">
+                                  <button
+                                    className={`toolbar-chip${record.is_bookmarked ? ' toolbar-chip-primary' : ''}`}
+                                    disabled={busy}
+                                    onClick={() => void toggleHistoryBookmark(record)}
+                                  >
+                                    {record.is_bookmarked ? 'Bookmarked' : 'Bookmark'}
+                                  </button>
+                                  <button
+                                    className="toolbar-chip toolbar-chip-danger"
+                                    disabled={busy || record.is_bookmarked}
+                                    onClick={() => void deleteHistoryRecord(record)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
                               </div>
                               <div className="history-card-copy">
                                 <div className="history-card-block">
@@ -1016,7 +1090,7 @@ function App() {
                                       <button
                                         key={tag}
                                         className="history-tag-chip"
-                                        disabled={deleting}
+                                        disabled={busy}
                                         onClick={() =>
                                           void removeHistoryTag(record.id, record.tags, tag)
                                         }
@@ -1044,9 +1118,9 @@ function App() {
                                       setHistoryTagDraft(record.id, event.target.value)
                                     }
                                     placeholder="Add tags (comma separated)"
-                                    disabled={deleting}
+                                    disabled={busy}
                                   />
-                                  <button className="toolbar-chip" disabled={deleting} type="submit">
+                                  <button className="toolbar-chip" disabled={busy} type="submit">
                                     Save tags
                                   </button>
                                 </form>

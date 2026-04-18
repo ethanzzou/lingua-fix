@@ -25,6 +25,7 @@ type LinguaFixHistoryRecord = {
   original_text: string
   translated_text: string
   created_at: number
+  is_bookmarked: boolean
   tags: string[]
 }
 
@@ -45,6 +46,7 @@ type LinguaFixHistoryQuery = {
   page_size?: number
   search?: string
   tag?: string
+  bookmark_status?: 'all' | 'bookmarked' | 'unbookmarked'
   sort?: 'newest' | 'oldest'
 }
 
@@ -63,6 +65,7 @@ interface Window {
     getConfig: () => Promise<LinguaFixConfig>
     getHistory: (query?: LinguaFixHistoryQuery) => Promise<LinguaFixHistoryResponse>
     deleteHistoryRecord: (id: number) => Promise<LinguaFixActionResponse>
+    setHistoryRecordBookmark: (id: number, isBookmarked: boolean) => Promise<LinguaFixActionResponse>
     updateHistoryRecordTags: (id: number, tags: string[]) => Promise<LinguaFixActionResponse>
     clearHistory: () => Promise<LinguaFixActionResponse>
     saveConfig: (config: LinguaFixConfig) => Promise<LinguaFixConfig>

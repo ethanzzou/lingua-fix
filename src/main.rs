@@ -10,14 +10,14 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use rusqlite::types::Value;
-use rusqlite::{Connection, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "LinguaFix";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_TRANSLATION_PROMPT: &str = "Decide what to do from the user's text. If the input is primarily Chinese, translate it into natural English while preserving meaning and tone. If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, and phrasing while preserving meaning and tone. Return only the final text with no explanation.";
 const TRANSLATION_LOG_FILE_NAME: &str = "translations.sqlite3";
-const TRANSLATION_LOG_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+const TRANSLATION_LOG_RETENTION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const DEFAULT_HISTORY_PAGE_SIZE: usize = 12;
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
 
@@ -34,6 +34,7 @@ async fn main() -> Result<(), String> {
         .route("/config", get(get_config).put(save_config))
         .route("/api/history", get(get_history).delete(clear_history))
         .route("/api/history/{id}", delete(delete_history_entry))
+        .route("/api/history/{id}/bookmark", put(update_history_bookmark))
         .route("/api/history/{id}/tags", put(update_history_tags))
         .route("/api/process", post(process_text))
         .with_state(state);
@@ -127,23 +128,14 @@ async fn process_text(
                 api_key,
                 model,
                 base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+                api: GeminiApi::AiStudio,
                 auth: GeminiAuth::ApiKey,
             }
             .run(&system_prompt, &text)
             .await
         }
         Provider::GeminiVertex => {
-            let resolved_base_url =
-                resolve_vertex_base_url(&base_url).map_err(ApiError::bad_request)?;
-
-            GeminiClient {
-                api_key,
-                model,
-                base_url: resolved_base_url,
-                auth: GeminiAuth::Bearer,
-            }
-            .run(&system_prompt, &text)
-            .await
+            run_vertex_request(api_key, model, base_url, &system_prompt, &text).await
         }
         Provider::CustomOpenAi => {
             ChatCompletionsClient {
@@ -192,7 +184,7 @@ async fn get_history(Query(query): Query<HistoryQuery>) -> Result<Json<HistoryRe
 
 async fn delete_history_entry(Path(id): Path<i64>) -> Result<Json<ActionResponse>, ApiError> {
     let data_dir = AppConfig::load().data_dir;
-    let deleted = tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         TranslationLogStore::delete(PathBuf::from(data_dir), id)
     })
     .await
@@ -203,11 +195,13 @@ async fn delete_history_entry(Path(id): Path<i64>) -> Result<Json<ActionResponse
     })?
     .map_err(ApiError::internal)?;
 
-    if !deleted {
-        return Err(ApiError::not_found("History record was not found."));
+    match outcome {
+        DeleteHistoryResult::Deleted => Ok(Json(ActionResponse { ok: true })),
+        DeleteHistoryResult::Protected => Err(ApiError::bad_request(
+            "Bookmarked history records cannot be deleted.",
+        )),
+        DeleteHistoryResult::Missing => Err(ApiError::not_found("History record was not found.")),
     }
-
-    Ok(Json(ActionResponse { ok: true }))
 }
 
 async fn clear_history() -> Result<Json<ActionResponse>, ApiError> {
@@ -247,6 +241,29 @@ async fn update_history_tags(
     Ok(Json(ActionResponse { ok: true }))
 }
 
+async fn update_history_bookmark(
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateBookmarkRequest>,
+) -> Result<Json<ActionResponse>, ApiError> {
+    let data_dir = AppConfig::load().data_dir;
+    let updated = tokio::task::spawn_blocking(move || {
+        TranslationLogStore::set_bookmark(PathBuf::from(data_dir), id, request.is_bookmarked)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "Could not join translation history bookmark update operation: {error}"
+        ))
+    })?
+    .map_err(ApiError::internal)?;
+
+    if !updated {
+        return Err(ApiError::not_found("History record was not found."));
+    }
+
+    Ok(Json(ActionResponse { ok: true }))
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -270,6 +287,7 @@ struct TranslationRecord {
     original_text: String,
     translated_text: String,
     created_at: i64,
+    is_bookmarked: bool,
     tags: Vec<String>,
 }
 
@@ -293,6 +311,11 @@ struct UpdateTagsRequest {
     tags: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct UpdateBookmarkRequest {
+    is_bookmarked: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum HistorySort {
@@ -301,12 +324,23 @@ enum HistorySort {
     Newest,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BookmarkStatusFilter {
+    #[default]
+    All,
+    Bookmarked,
+    Unbookmarked,
+}
+
 #[derive(Default, Deserialize)]
 struct HistoryQuery {
     page: Option<usize>,
     page_size: Option<usize>,
     search: Option<String>,
     tag: Option<String>,
+    #[serde(default)]
+    bookmark_status: BookmarkStatusFilter,
     #[serde(default)]
     sort: HistorySort,
 }
@@ -317,6 +351,7 @@ struct NormalizedHistoryQuery {
     page_size: usize,
     search: Option<String>,
     tag: Option<String>,
+    bookmark_status: BookmarkStatusFilter,
     sort: HistorySort,
 }
 
@@ -333,6 +368,7 @@ impl NormalizedHistoryQuery {
             page_size,
             search: query.search.and_then(normalize_optional_filter),
             tag: query.tag.and_then(normalize_optional_filter),
+            bookmark_status: query.bookmark_status,
             sort: query.sort,
         }
     }
@@ -347,6 +383,7 @@ impl NormalizedHistoryQuery {
             page_size: self.page_size,
             search: self.search.clone(),
             tag: self.tag.clone(),
+            bookmark_status: self.bookmark_status,
             sort: self.sort,
         }
     }
@@ -486,6 +523,12 @@ fn config_path() -> PathBuf {
 
 struct TranslationLogStore;
 
+enum DeleteHistoryResult {
+    Deleted,
+    Protected,
+    Missing,
+}
+
 impl TranslationLogStore {
     fn record(
         data_dir: PathBuf,
@@ -502,14 +545,14 @@ impl TranslationLogStore {
 
         transaction
             .execute(
-                "INSERT INTO translations (original_text, translated_text, created_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO translations (original_text, translated_text, created_at, is_bookmarked) VALUES (?1, ?2, ?3, 0)",
                 params![original_text, translated_text, now],
             )
             .map_err(|error| format!("Could not insert translation log: {error}"))?;
 
         transaction
             .execute(
-                "DELETE FROM translations WHERE created_at < ?1",
+                "DELETE FROM translations WHERE created_at < ?1 AND is_bookmarked = 0",
                 params![cutoff],
             )
             .map_err(|error| format!("Could not prune expired translation logs: {error}"))?;
@@ -551,7 +594,7 @@ impl TranslationLogStore {
 
         let mut statement = connection
             .prepare(&format!(
-                "SELECT tr.id, tr.original_text, tr.translated_text, tr.created_at
+                "SELECT tr.id, tr.original_text, tr.translated_text, tr.created_at, tr.is_bookmarked
                 FROM translations tr
                 {}
                 ORDER BY {}
@@ -574,6 +617,7 @@ impl TranslationLogStore {
                     original_text: row.get(1)?,
                     translated_text: row.get(2)?,
                     created_at: row.get(3)?,
+                    is_bookmarked: row.get(4)?,
                     tags: Vec::new(),
                 })
             })
@@ -599,16 +643,33 @@ impl TranslationLogStore {
         })
     }
 
-    fn delete(data_dir: PathBuf, id: i64) -> Result<bool, String> {
+    fn delete(data_dir: PathBuf, id: i64) -> Result<DeleteHistoryResult, String> {
         let connection = Self::open(data_dir)?;
         Self::prune_expired(&connection)?;
 
-        let deleted = connection
+        let is_bookmarked = connection
+            .query_row(
+                "SELECT is_bookmarked FROM translations WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not read translation history row: {error}"))?;
+
+        let Some(is_bookmarked) = is_bookmarked else {
+            return Ok(DeleteHistoryResult::Missing);
+        };
+
+        if is_bookmarked {
+            return Ok(DeleteHistoryResult::Protected);
+        }
+
+        connection
             .execute("DELETE FROM translations WHERE id = ?1", params![id])
             .map_err(|error| format!("Could not delete translation history row: {error}"))?;
         Self::prune_unused_tags(&connection)?;
 
-        Ok(deleted > 0)
+        Ok(DeleteHistoryResult::Deleted)
     }
 
     fn clear(data_dir: PathBuf) -> Result<(), String> {
@@ -616,11 +677,25 @@ impl TranslationLogStore {
         Self::prune_expired(&connection)?;
 
         connection
-            .execute("DELETE FROM translations", [])
+            .execute("DELETE FROM translations WHERE is_bookmarked = 0", [])
             .map_err(|error| format!("Could not clear translation history: {error}"))?;
         Self::prune_unused_tags(&connection)?;
 
         Ok(())
+    }
+
+    fn set_bookmark(data_dir: PathBuf, id: i64, is_bookmarked: bool) -> Result<bool, String> {
+        let connection = Self::open(data_dir)?;
+        Self::prune_expired(&connection)?;
+
+        let updated = connection
+            .execute(
+                "UPDATE translations SET is_bookmarked = ?1 WHERE id = ?2",
+                params![is_bookmarked, id],
+            )
+            .map_err(|error| format!("Could not update translation bookmark: {error}"))?;
+
+        Ok(updated > 0)
     }
 
     fn replace_tags(data_dir: PathBuf, id: i64, tags: Vec<String>) -> Result<bool, String> {
@@ -710,7 +785,8 @@ impl TranslationLogStore {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     original_text TEXT NOT NULL,
                     translated_text TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    is_bookmarked INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_translations_created_at
                 ON translations (created_at);
@@ -733,6 +809,18 @@ impl TranslationLogStore {
             )
             .map_err(|error| format!("Could not initialize translation log database: {error}"))?;
 
+        Self::ensure_translation_column(
+            &connection,
+            "is_bookmarked",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        connection
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_translations_bookmarked ON translations (is_bookmarked)",
+                [],
+            )
+            .map_err(|error| format!("Could not initialize translation bookmark index: {error}"))?;
+
         Ok(connection)
     }
 
@@ -741,7 +829,7 @@ impl TranslationLogStore {
 
         connection
             .execute(
-                "DELETE FROM translations WHERE created_at < ?1",
+                "DELETE FROM translations WHERE created_at < ?1 AND is_bookmarked = 0",
                 params![cutoff],
             )
             .map_err(|error| format!("Could not prune expired translation logs: {error}"))?;
@@ -834,6 +922,27 @@ impl TranslationLogStore {
 
         Ok(())
     }
+
+    fn ensure_translation_column(
+        connection: &Connection,
+        column_name: &str,
+        definition: &str,
+    ) -> Result<(), String> {
+        match connection.execute(
+            &format!("ALTER TABLE translations ADD COLUMN {column_name} {definition}"),
+            [],
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("duplicate column name") {
+                    Ok(())
+                } else {
+                    Err(format!("Could not migrate translation log schema: {error}"))
+                }
+            }
+        }
+    }
 }
 
 struct HistorySqlFilter {
@@ -879,6 +988,16 @@ impl HistorySqlFilter {
                     .to_owned(),
                 );
                 params.push(Value::Text(normalized_tag));
+            }
+        }
+
+        match query.bookmark_status {
+            BookmarkStatusFilter::All => {}
+            BookmarkStatusFilter::Bookmarked => {
+                conditions.push("tr.is_bookmarked = 1".to_owned());
+            }
+            BookmarkStatusFilter::Unbookmarked => {
+                conditions.push("tr.is_bookmarked = 0".to_owned());
             }
         }
 
@@ -953,10 +1072,19 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn resolve_vertex_base_url(base_url: &str) -> Result<String, String> {
+fn resolve_vertex_base_url(base_url: &str, auth: GeminiAuth) -> Result<String, String> {
     let trimmed = base_url.trim();
     if !trimmed.is_empty() {
         return Ok(normalize_vertex_base_url(trimmed));
+    }
+
+    if matches!(auth, GeminiAuth::ApiKey) {
+        if let Some(project) = vertex_project() {
+            let location = vertex_location().unwrap_or_else(|| "global".to_owned());
+            return Ok(build_vertex_base_url(&project, &location));
+        }
+
+        return Ok("https://aiplatform.googleapis.com/v1".to_owned());
     }
 
     let project = vertex_project().ok_or_else(|| {
@@ -992,6 +1120,63 @@ fn build_vertex_base_url(project: &str, location: &str) -> String {
     format!(
         "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}"
     )
+}
+
+fn infer_vertex_auth(value: &str) -> GeminiAuth {
+    let trimmed = value.trim();
+
+    if trimmed.starts_with("ya29.") || trimmed.starts_with("Bearer ") {
+        GeminiAuth::Bearer
+    } else {
+        GeminiAuth::ApiKey
+    }
+}
+
+async fn run_vertex_request(
+    api_key: String,
+    model: String,
+    base_url: String,
+    system_prompt: &str,
+    input: &str,
+) -> Result<String, String> {
+    let preferred_auth = infer_vertex_auth(&api_key);
+    let fallback_auth = match preferred_auth {
+        GeminiAuth::ApiKey => GeminiAuth::Bearer,
+        GeminiAuth::Bearer => GeminiAuth::ApiKey,
+    };
+
+    let primary_base_url = resolve_vertex_base_url(&base_url, preferred_auth)?;
+    let primary = GeminiClient {
+        api_key: api_key.clone(),
+        model: model.clone(),
+        base_url: primary_base_url,
+        api: GeminiApi::Vertex,
+        auth: preferred_auth,
+    };
+
+    match primary.run(system_prompt, input).await {
+        Ok(output) => Ok(output),
+        Err(error) if should_retry_vertex_with_other_auth(&error) => {
+            let fallback_base_url = resolve_vertex_base_url(&base_url, fallback_auth)?;
+            GeminiClient {
+                api_key,
+                model,
+                base_url: fallback_base_url,
+                api: GeminiApi::Vertex,
+                auth: fallback_auth,
+            }
+            .run(system_prompt, input)
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn should_retry_vertex_with_other_auth(error: &str) -> bool {
+    error.contains("\"reason\": \"API_KEY_SERVICE_BLOCKED\"")
+        || error.contains("Expected OAuth 2 access token")
+        || error.contains("API keys are not supported by this API")
+        || error.contains("\"reason\": \"CREDENTIALS_MISSING\"")
 }
 
 fn vertex_project() -> Option<String> {
@@ -1262,15 +1447,23 @@ struct ResponseContent {
 
 // --- Gemini (AI Studio + Vertex AI) ---
 
+#[derive(Clone, Copy)]
 enum GeminiAuth {
     ApiKey,
     Bearer,
+}
+
+#[derive(Clone, Copy)]
+enum GeminiApi {
+    AiStudio,
+    Vertex,
 }
 
 struct GeminiClient {
     api_key: String,
     model: String,
     base_url: String,
+    api: GeminiApi,
     auth: GeminiAuth,
 }
 
@@ -1294,8 +1487,8 @@ impl GeminiClient {
             .build()
             .map_err(|error| format!("Could not build HTTP client: {error}"))?;
 
-        let url = match self.auth {
-            GeminiAuth::ApiKey => {
+        let url = match (self.api, self.auth) {
+            (GeminiApi::AiStudio, GeminiAuth::ApiKey) => {
                 format!(
                     "{}/models/{}:generateContent?key={}",
                     self.base_url.trim_end_matches('/'),
@@ -1303,7 +1496,15 @@ impl GeminiClient {
                     self.api_key
                 )
             }
-            GeminiAuth::Bearer => {
+            (GeminiApi::Vertex, GeminiAuth::ApiKey) => {
+                format!(
+                    "{}/publishers/google/models/{}:generateContent?key={}",
+                    self.base_url.trim_end_matches('/'),
+                    self.model,
+                    self.api_key
+                )
+            }
+            (_, GeminiAuth::Bearer) => {
                 format!(
                     "{}/publishers/google/models/{}:generateContent",
                     self.base_url.trim_end_matches('/'),

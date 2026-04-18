@@ -686,6 +686,12 @@ ipcMain.handle('linguafix:delete-history-record', async (_event, id) =>
     method: 'DELETE',
   }),
 );
+ipcMain.handle('linguafix:set-history-record-bookmark', async (_event, id, isBookmarked) =>
+  callService(`/api/history/${id}/bookmark`, {
+    method: 'PUT',
+    body: JSON.stringify({ is_bookmarked: Boolean(isBookmarked) }),
+  }),
+);
 ipcMain.handle('linguafix:update-history-record-tags', async (_event, id, tags) =>
   callService(`/api/history/${id}/tags`, {
     method: 'PUT',
