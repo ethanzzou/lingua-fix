@@ -1,13 +1,20 @@
-const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Notification, screen } = require('electron');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { promisify } = require('node:util');
 const process = require('node:process');
 const fs = require('node:fs');
 
 const SERVICE_PORT = Number(process.env.LINGUAFIX_PORT || 8787);
 const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
-const QUICK_TRANSLATE_HOTKEY = 'Control+Shift+L';
+const IN_PLACE_TRANSLATE_HOTKEY = 'Control+Shift+T';
+const QUICK_TRANSLATE_POPUP_HOTKEY = 'Control+Shift+L';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
+const execFile = promisify(require('node:child_process').execFile);
+const AUTOMATION_SHORTCUT_SETTLE_DELAY_MS = 220;
+const AUTOMATION_COPY_POLL_ATTEMPTS = 15;
+const AUTOMATION_COPY_POLL_DELAY_MS = 100;
+const AUTOMATION_PASTE_RESTORE_DELAY_MS = 180;
 
 let mainWindow = null;
 let popupWindow = null;
@@ -16,6 +23,7 @@ let popupHelperProcess = null;
 let serviceProcess = null;
 let ownsServiceProcess = false;
 let isQuitting = false;
+let isRunningSelectionReplace = false;
 
 function isDev() {
   return !app.isPackaged;
@@ -122,6 +130,313 @@ async function callService(pathname, options = {}) {
   }
 
   return payload;
+}
+
+function buildHistoryPath(query = {}) {
+  const searchParams = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+
+    searchParams.set(key, String(value));
+  }
+
+  const suffix = searchParams.toString();
+  return suffix ? `/api/history?${suffix}` : '/api/history';
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function notify(message) {
+  if (Notification.isSupported()) {
+    new Notification({
+      title: 'LinguaFix',
+      body: message,
+    }).show();
+    return;
+  }
+
+  console.log(`[LinguaFix] ${message}`);
+}
+
+function appleScriptQuoted(value) {
+  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+async function runAppleScript(script) {
+  const { stdout } = await execFile('osascript', ['-e', script]);
+  return stdout.trim();
+}
+
+async function triggerMacSelectionShortcut(key) {
+  await runAppleScript(`
+    tell application "System Events"
+      keystroke "${key}" using command down
+    end tell
+  `);
+}
+
+async function getFrontmostMacAppName() {
+  return runAppleScript(`
+    tell application "System Events"
+      name of first application process whose frontmost is true
+    end tell
+  `);
+}
+
+async function activateMacApp(appName) {
+  if (!appName) {
+    return;
+  }
+
+  await runAppleScript(`
+    tell application ${appleScriptQuoted(appName)}
+      activate
+    end tell
+  `);
+}
+
+async function readSelectedTextViaMacAccessibility(appName) {
+  if (!appName) {
+    return '';
+  }
+
+  return runAppleScript(`
+    tell application "System Events"
+      tell application process ${appleScriptQuoted(appName)}
+        try
+          set focusedElement to value of attribute "AXFocusedUIElement"
+          set selectedText to value of attribute "AXSelectedText" of focusedElement
+
+          if selectedText is missing value then
+            return ""
+          end if
+
+          return selectedText
+        on error
+          return ""
+        end try
+      end tell
+    end tell
+  `);
+}
+
+async function readSelectedRangeViaMacAccessibility(appName) {
+  if (!appName) {
+    return null;
+  }
+
+  const rawRange = await runAppleScript(`
+    tell application "System Events"
+      tell application process ${appleScriptQuoted(appName)}
+        try
+          set focusedElement to value of attribute "AXFocusedUIElement"
+          set selectedRange to value of attribute "AXSelectedTextRange" of focusedElement
+
+          if selectedRange is missing value then
+            return ""
+          end if
+
+          return (item 1 of selectedRange as string) & "," & (item 2 of selectedRange as string)
+        on error
+          return ""
+        end try
+      end tell
+    end tell
+  `);
+
+  if (!rawRange) {
+    return null;
+  }
+
+  const [startText, lengthText] = rawRange.split(',');
+  const start = Number.parseInt(startText ?? '', 10);
+  const length = Number.parseInt(lengthText ?? '', 10);
+
+  if (!Number.isInteger(start) || !Number.isInteger(length) || start < 0 || length < 0) {
+    return null;
+  }
+
+  return { start, length };
+}
+
+async function readSelectedTextFromMacClipboard(clipboardBackup, appName) {
+  const clipboardSentinel = `__LINGUAFIX_SELECTION__${Date.now()}__`;
+
+  clipboard.writeText(clipboardSentinel);
+  await activateMacApp(appName);
+  await sleep(AUTOMATION_SHORTCUT_SETTLE_DELAY_MS);
+  await triggerMacSelectionShortcut('c');
+
+  let selectedText = '';
+
+  for (let attempt = 0; attempt < AUTOMATION_COPY_POLL_ATTEMPTS; attempt += 1) {
+    await sleep(AUTOMATION_COPY_POLL_DELAY_MS);
+    selectedText = clipboard.readText();
+
+    if (selectedText !== clipboardSentinel) {
+      return {
+        clipboardBackup,
+        selectedText,
+      };
+    }
+  }
+
+  clipboard.writeText(clipboardBackup);
+
+  return {
+    clipboardBackup,
+    selectedText: '',
+  };
+}
+
+async function readSelectedTextFromMacApp() {
+  const clipboardBackup = clipboard.readText();
+  const frontmostAppName = await getFrontmostMacAppName();
+  const accessibilitySelectedText = await readSelectedTextViaMacAccessibility(frontmostAppName);
+  const accessibilitySelectedRange = await readSelectedRangeViaMacAccessibility(frontmostAppName);
+
+  if (accessibilitySelectedText.trim()) {
+    return {
+      clipboardBackup,
+      frontmostAppName,
+      selectedText: accessibilitySelectedText,
+      selectedRange: accessibilitySelectedRange,
+    };
+  }
+
+  const clipboardSelectionState = await readSelectedTextFromMacClipboard(
+    clipboardBackup,
+    frontmostAppName,
+  );
+  return {
+    ...clipboardSelectionState,
+    frontmostAppName,
+    selectedRange: accessibilitySelectedRange,
+  };
+}
+
+async function replaceSelectionViaMacAccessibility(text, appName, selectedRange) {
+  if (!appName || !selectedRange || selectedRange.length <= 0) {
+    return false;
+  }
+
+  const rawResult = await runAppleScript(`
+    tell application "System Events"
+      tell application process ${appleScriptQuoted(appName)}
+        try
+          set focusedElement to value of attribute "AXFocusedUIElement"
+          set currentValue to value of attribute "AXValue" of focusedElement
+
+          if currentValue is missing value then
+            return "false"
+          end if
+
+          set rangeStart to ${selectedRange.start}
+          set rangeLength to ${selectedRange.length}
+          set replacementText to ${appleScriptQuoted(text)}
+          set currentLength to length of currentValue
+          set prefixText to ""
+          set suffixText to ""
+
+          if rangeStart > 0 then
+            set prefixText to text 1 thru rangeStart of currentValue
+          end if
+
+          if (rangeStart + rangeLength) < currentLength then
+            set suffixText to text (rangeStart + rangeLength + 1) thru -1 of currentValue
+          end if
+
+          set value of attribute "AXValue" of focusedElement to (prefixText & replacementText & suffixText)
+
+          try
+            set value of attribute "AXSelectedTextRange" of focusedElement to {(rangeStart + (length of replacementText)), 0}
+          end try
+
+          return "true"
+        on error
+          return "false"
+        end try
+      end tell
+    end tell
+  `);
+
+  return rawResult === 'true';
+}
+
+async function replaceSelectionInMacApp(text, clipboardBackup, frontmostAppName, selectedRange) {
+  const replacedViaAccessibility = await replaceSelectionViaMacAccessibility(
+    text,
+    frontmostAppName,
+    selectedRange,
+  );
+
+  if (replacedViaAccessibility) {
+    return;
+  }
+
+  clipboard.writeText(text);
+  await sleep(AUTOMATION_SHORTCUT_SETTLE_DELAY_MS);
+  await triggerMacSelectionShortcut('v');
+  await sleep(AUTOMATION_PASTE_RESTORE_DELAY_MS);
+  clipboard.writeText(clipboardBackup);
+}
+
+async function tryProcessSelectedTextInPlace() {
+  if (process.platform !== 'darwin') {
+    notify('In-place selection replace is currently supported on macOS only.');
+    return true;
+  }
+
+  if (isRunningSelectionReplace) {
+    return true;
+  }
+
+  isRunningSelectionReplace = true;
+  let clipboardBackup = null;
+
+  try {
+    const selectionState = await readSelectedTextFromMacApp();
+    clipboardBackup = selectionState.clipboardBackup;
+    const { frontmostAppName, selectedRange, selectedText } = selectionState;
+
+    if (!selectedText.trim()) {
+      clipboard.writeText(clipboardBackup);
+      notify('Could not read the current text selection.');
+      return true;
+    }
+
+    const response = await callService('/api/process', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: 'auto_process',
+        text: selectedText,
+      }),
+    });
+
+    await replaceSelectionInMacApp(
+      response.output,
+      clipboardBackup,
+      frontmostAppName,
+      selectedRange,
+    );
+    return true;
+  } catch (error) {
+    if (typeof clipboardBackup === 'string') {
+      clipboard.writeText(clipboardBackup);
+    }
+
+    notify(
+      error instanceof Error ? error.message : 'Could not process the selected text.',
+    );
+    return true;
+  } finally {
+    isRunningSelectionReplace = false;
+  }
 }
 
 function rendererUrl(search = '') {
@@ -313,70 +628,7 @@ function hideQuickTranslatePopup() {
   }
 }
 
-function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: 'ignore',
-      ...options,
-    });
-
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(`Command exited with code ${code ?? 'unknown'}.`));
-    });
-  });
-}
-
-async function triggerSystemCopyShortcut() {
-  if (process.platform === 'darwin') {
-    await runCommand('osascript', [
-      '-e',
-      'tell application "System Events" to keystroke "c" using {command down}',
-    ]);
-    return;
-  }
-
-  if (process.platform === 'win32') {
-    await runCommand('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^c")',
-    ]);
-    return;
-  }
-
-  await runCommand('xdotool', ['key', '--clearmodifiers', 'ctrl+c']);
-}
-
-async function readSelectedTextOrClipboard() {
-  const clipboardBefore = clipboard.readText();
-
-  try {
-    await triggerSystemCopyShortcut();
-    await new Promise((resolve) => setTimeout(resolve, 180));
-
-    const selectedText = clipboard.readText().trim();
-
-    if (selectedText) {
-      if (selectedText !== clipboardBefore) {
-        clipboard.writeText(clipboardBefore);
-      }
-
-      return selectedText;
-    }
-  } catch (_) {
-    // Fall back to the existing clipboard contents.
-  }
-
-  return clipboardBefore.trim();
-}
-
-function showQuickTranslatePopup(initialText = '') {
+function showQuickTranslatePopup() {
   const window = createPopupWindow();
 
   if (window.isMinimized()) {
@@ -387,7 +639,6 @@ function showQuickTranslatePopup(initialText = '') {
   popupIgnoreBlurUntil = Date.now() + 1000;
   window.show();
   window.moveTop();
-  window.webContents.send('linguafix:populate-quick-translate-input', initialText);
 
   if (process.platform !== 'darwin') {
     window.focus();
@@ -407,17 +658,12 @@ function toggleQuickTranslatePopup() {
 }
 
 function registerGlobalHotkeys() {
-  globalShortcut.register(QUICK_TRANSLATE_HOTKEY, async () => {
-    const window = createPopupWindow();
+  globalShortcut.register(IN_PLACE_TRANSLATE_HOTKEY, async () => {
+    await tryProcessSelectedTextInPlace();
+  });
 
-    if (window.isVisible()) {
-      popupIgnoreBlurUntil = 0;
-      hideQuickTranslatePopup();
-      return;
-    }
-
-    const initialText = await readSelectedTextOrClipboard();
-    showQuickTranslatePopup(initialText);
+  globalShortcut.register(QUICK_TRANSLATE_POPUP_HOTKEY, () => {
+    toggleQuickTranslatePopup();
   });
 }
 
@@ -432,6 +678,23 @@ ipcMain.handle('linguafix:process-text', async (_event, request) =>
   callService('/api/process', {
     method: 'POST',
     body: JSON.stringify(request),
+  }),
+);
+ipcMain.handle('linguafix:get-history', async (_event, query) => callService(buildHistoryPath(query)));
+ipcMain.handle('linguafix:delete-history-record', async (_event, id) =>
+  callService(`/api/history/${id}`, {
+    method: 'DELETE',
+  }),
+);
+ipcMain.handle('linguafix:update-history-record-tags', async (_event, id, tags) =>
+  callService(`/api/history/${id}/tags`, {
+    method: 'PUT',
+    body: JSON.stringify({ tags }),
+  }),
+);
+ipcMain.handle('linguafix:clear-history', async () =>
+  callService('/api/history', {
+    method: 'DELETE',
   }),
 );
 ipcMain.handle('linguafix:hide-popup', async () => {
