@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type TaskKind = 'auto_process'
+type PopupMode = 'manual' | 'selection_translation'
 
 type Provider = 'open_ai' | 'gemini_ai_studio' | 'gemini_vertex' | 'custom_open_ai'
 
@@ -156,6 +157,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [showQuickTranslateOverlay, setShowQuickTranslateOverlay] = useState(false)
+  const [popupMode, setPopupMode] = useState<PopupMode>('manual')
   const [status, setStatus] = useState<{ kind: StatusKind; text: string }>({
     kind: 'idle',
     text: '',
@@ -214,6 +216,23 @@ function App() {
       return
     }
 
+    const unsubscribe = window.linguafix.onPopupSession((session) => {
+      setPopupMode(session.mode)
+
+      if (typeof session.input === 'string') {
+        setPreviousInput(session.source_text ?? '')
+        setInput(session.input)
+      }
+
+      if (session.mode === 'selection_translation') {
+        setStatus({ kind: 'success', text: 'Selected text translated to Chinese.' })
+      } else {
+        setStatus({ kind: 'idle', text: '' })
+      }
+
+      window.setTimeout(() => popupInputRef.current?.focus(), 0)
+    })
+
     popupInputRef.current?.focus()
 
     const handleVisibility = () => {
@@ -221,7 +240,10 @@ function App() {
     }
 
     window.addEventListener('focus', handleVisibility)
-    return () => window.removeEventListener('focus', handleVisibility)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('focus', handleVisibility)
+    }
   }, [isQuickTranslatePopup])
 
   useEffect(() => {
@@ -548,6 +570,8 @@ function App() {
       : page === 'history'
         ? 'Saved translations'
         : 'Writing Studio'
+  const isSelectionTranslationPopup = popupMode === 'selection_translation'
+  const popupTitle = isSelectionTranslationPopup ? 'Selection Translation' : 'Quick Translate'
 
   const toolbarState = (() => {
     if (page === 'settings') {
@@ -603,7 +627,7 @@ function App() {
     return (
       <div className={`app-frame popup-frame${isMac ? ' macos-frame' : ''}`}>
         <header className="popup-bar">
-          <span className="popup-bar-title">Quick Translate</span>
+          <span className="popup-bar-title">{popupTitle}</span>
           <div className="popup-bar-actions">
             <button className="toolbar-chip" onClick={() => void hideQuickTranslatePopup()}>
               Close
@@ -616,6 +640,7 @@ function App() {
             ref={popupInputRef}
             className="popup-textarea"
             value={input}
+            readOnly={isSelectionTranslationPopup}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
@@ -623,12 +648,20 @@ function App() {
                 void hideQuickTranslatePopup()
               }
 
-              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+              if (
+                !isSelectionTranslationPopup &&
+                (event.metaKey || event.ctrlKey) &&
+                event.key === 'Enter'
+              ) {
                 event.preventDefault()
                 void runTask('auto_process')
               }
             }}
-            placeholder="Paste or type text to improve…"
+            placeholder={
+              isSelectionTranslationPopup
+                ? 'Translated Chinese text will appear here.'
+                : 'Paste or type text to improve…'
+            }
           />
         </div>
 
@@ -637,23 +670,27 @@ function App() {
             {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
           </div>
           <div className="popup-footer-actions">
-            <button
-              className="toolbar-chip"
-              disabled={!previousInput}
-              onClick={undoLastChange}
-            >
-              Undo
-            </button>
             <button className="toolbar-chip" onClick={() => void copyOutput()}>
               Copy
             </button>
-            <button
-              className="toolbar-chip toolbar-chip-primary"
-              disabled={busy || loading}
-              onClick={() => void runTask('auto_process')}
-            >
-              Improve
-            </button>
+            {!isSelectionTranslationPopup ? (
+              <>
+                <button
+                  className="toolbar-chip"
+                  disabled={!previousInput}
+                  onClick={undoLastChange}
+                >
+                  Undo
+                </button>
+                <button
+                  className="toolbar-chip toolbar-chip-primary"
+                  disabled={busy || loading}
+                  onClick={() => void runTask('auto_process')}
+                >
+                  Improve
+                </button>
+              </>
+            ) : null}
           </div>
         </footer>
       </div>

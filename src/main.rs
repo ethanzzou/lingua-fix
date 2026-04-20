@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 const APP_NAME: &str = "LinguaFix";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_TRANSLATION_PROMPT: &str = "Decide what to do from the user's text. If the input is primarily Chinese, translate it into natural English while preserving meaning and tone. If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, and phrasing while preserving meaning and tone. Return only the final text with no explanation.";
+const DEFAULT_ENGLISH_TO_CHINESE_PROMPT: &str = "Translate the English input into natural, accurate Simplified Chinese while preserving meaning, tone, and formatting when possible. Return only the final Chinese translation with no explanation.";
 const TRANSLATION_LOG_FILE_NAME: &str = "translations.sqlite3";
 const TRANSLATION_LOG_RETENTION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const DEFAULT_HISTORY_PAGE_SIZE: usize = 12;
@@ -1292,12 +1293,14 @@ fn non_empty(value: String) -> Option<String> {
 #[serde(rename_all = "snake_case")]
 enum AiTask {
     AutoProcess,
+    TranslateEnglishToChinese,
 }
 
 impl AiTask {
     fn system_prompt<'a>(&self, translation_prompt: &'a str) -> &'a str {
         match self {
             Self::AutoProcess => translation_prompt,
+            Self::TranslateEnglishToChinese => DEFAULT_ENGLISH_TO_CHINESE_PROMPT,
         }
     }
 }

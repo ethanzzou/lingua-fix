@@ -12,6 +12,13 @@ contextBridge.exposeInMainWorld('linguafix', {
   saveConfig: (config) => ipcRenderer.invoke('linguafix:save-config', config),
   processText: (request) => ipcRenderer.invoke('linguafix:process-text', request),
   hidePopup: () => ipcRenderer.invoke('linguafix:hide-popup'),
+  onPopupSession: (callback) => {
+    const listener = (_event, session) => callback(session);
+    ipcRenderer.on('linguafix:popup-session', listener);
+    return () => {
+      ipcRenderer.removeListener('linguafix:popup-session', listener);
+    };
+  },
   onShowQuickTranslateOverlay: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('linguafix:show-quick-translate-overlay', listener);
