@@ -1,78 +1,172 @@
 # LinguaFix
 
-LinguaFix now uses the same general app split you asked for:
+LinguaFix is a desktop AI writing assistant for fast text rewriting and translation.
 
-- Electron for the desktop shell
-- React + TypeScript for the renderer UI
-- Rust for the local backend service
+It is built for a simple workflow:
 
-The app supports one automatic AI action:
+- Chinese input -> natural English
+- English input -> cleaner, more natural English
 
-- If the input is Chinese, it translates it into natural English
-- If the input is English, it rewrites it into correct, natural English
+The app combines an Electron desktop shell, a React frontend, and a Rust local service. It also includes global shortcuts for quick text processing on macOS.
 
-The system prompt used for that behavior is configurable from the Settings screen.
+## Features
 
-Each translation is logged locally with:
+- Automatic text handling based on input language
+- English rewriting for grammar, spelling, punctuation, and phrasing
+- Chinese-to-English translation
+- Quick popup workflow for short text edits
+- macOS in-place processing for selected text
+- English-to-Chinese popup translation shortcut
+- Local translation history with search, tags, bookmarks, and pagination
+- Configurable model provider, API key, model, prompt, and data directory
+- Local SQLite storage
 
-- the original input text
-- the translated or rewritten result
+## Shortcuts
 
-Logs are stored in a SQLite database named `translations.sqlite3`, and records older than 30 days are removed automatically.
+- `Ctrl+Shift+L` opens the quick popup
+- `Ctrl+Shift+T` processes the current selection in place on macOS
+- `Ctrl+Shift+R` translates the current English selection into Simplified Chinese in a popup
 
-Translation history is available on a dedicated page with pagination, grouping, search and tag filters, per-record tagging, individual deletion, and clear-all controls.
+The in-place macOS workflow copies the selected text, sends it through LinguaFix, pastes the result back, and restores the clipboard.
 
-On macOS, LinguaFix also supports an in-place shortcut workflow:
+## Supported Providers
 
-- Select text in another app
-- Press `Ctrl+Shift+T`
-- LinguaFix copies the selection, processes it, pastes the result back, and restores your clipboard
+- OpenAI
+- Gemini AI Studio
+- Gemini Vertex AI
+- Custom OpenAI-compatible APIs
 
-If there is no active text selection, LinguaFix shows a notification instead of opening a popup.
+## Tech Stack
 
-The popup shortcut is:
+- Electron
+- React 19
+- TypeScript
+- Vite
+- Rust
+- Axum
+- SQLite via `rusqlite`
 
-- Press `Ctrl+Shift+L` to open the quick-translate popup
-- Press `Ctrl+Shift+R` to translate the current English selection into Chinese and show the result in a popup
+## Project Structure
 
-## Requirements
+```text
+.
+|-- electron/          # Electron main process, preload, shortcuts, tray integration
+|-- frontend/          # React UI
+|-- src/main.rs        # Rust local API service and persistence layer
+|-- scripts/           # Packaging and macOS helper scripts
+|-- design/            # Icons and design assets
+|-- package.json       # Top-level desktop scripts
+`-- Cargo.toml         # Rust dependencies
+```
+
+## Getting Started
+
+### Requirements
 
 - Node.js
 - npm
 - Rust toolchain
-- An OpenAI API key
+- At least one valid API key for a supported provider
 
-For the in-place shortcut on macOS, you also need to allow Accessibility access for the app so it can send copy and paste keystrokes to the active application.
-
-## Development
+### Install
 
 ```bash
 npm install
 npm --prefix frontend install
+```
+
+### Run in Development
+
+```bash
 npm run dev
 ```
 
-That starts:
+This starts:
 
-- the Vite React dev server
-- the Electron desktop shell
-- the Rust local service, spawned by Electron
+- the Vite frontend dev server
+- the Electron desktop app
+- the Rust local service, launched by Electron
 
-## Build
+### Build
 
 ```bash
 npm run build
 npm start
 ```
 
-This builds the React frontend and the Rust release binary, then launches the app from the local source checkout using the built assets.
+### Install as a macOS App
+
+```bash
+npm run install:mac-app
+```
+
+## Configuration
+
+LinguaFix stores configuration locally in:
+
+- `LinguaFix/config.json`
+
+The configurable fields include:
+
+- provider
+- API key
+- model
+- base URL
+- translation prompt
+- data directory
+
+By default, the app also stores translation history locally in:
+
+- `LinguaFix/translations.sqlite3`
+
+You can override the data directory from Settings or with the `LINGUAFIX_DATA_DIR` environment variable.
+
+## History
+
+Processed results are saved locally and can be managed from the history view.
+
+Current history capabilities:
+
+- search
+- tag filtering
+- bookmark filtering
+- sort by newest or oldest
+- per-record tags
+- per-record bookmarks
+- delete individual records
+- clear all history
+
+Unbookmarked records are automatically pruned over time. In the current codebase, the retention window is 365 days.
 
 ## Architecture
 
-- `frontend/`: React + TypeScript UI
-- `electron/`: Electron main and preload scripts
-- `src/main.rs`: Rust HTTP service that stores config locally and calls OpenAI
+LinguaFix is split into three layers:
 
-The API key, selected model, translation prompt, and configured data directory are stored in your platform config directory under `LinguaFix/config.json`.
+- Electron handles the desktop shell, windows, shortcuts, notifications, and IPC
+- React handles the UI, settings, popup flows, and history screens
+- Rust handles local HTTP APIs, config persistence, provider requests, and SQLite history
 
-By default, translation logs are written to your platform-local data directory under `LinguaFix/translations.sqlite3`. You can override that location from Settings or with the `LINGUAFIX_DATA_DIR` environment variable.
+The Rust service exposes endpoints for:
+
+- health checks
+- config load/save
+- text processing
+- history listing
+- history deletion
+- bookmark updates
+- tag updates
+
+## Notes
+
+- The macOS in-place replacement workflow requires Accessibility permission because the app simulates copy and paste.
+- The Rust service listens on `127.0.0.1` and is started locally by Electron.
+
+## Contributing
+
+Contributions are easiest when changes stay within the existing split:
+
+- Electron changes in `electron/`
+- UI changes in `frontend/`
+- service and persistence changes in `src/main.rs`
+
+If you add a new text-processing mode or provider, prefer implementing the core behavior in the Rust service rather than spreading request logic across the frontend.
