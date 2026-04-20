@@ -33,6 +33,7 @@ If there is no active text selection, LinguaFix shows a notification instead of 
 The popup shortcut is:
 
 - Press `Ctrl+Shift+L` to open the quick-translate popup
+- Press `Ctrl+Shift+R` to translate the current English selection into Chinese and show the result in a popup
 
 ## Requirements
 
@@ -47,6 +48,7 @@ For the in-place shortcut on macOS, you also need to allow Accessibility access 
 
 ```bash
 npm install
+npm --prefix frontend install
 npm run dev
 ```
 
@@ -60,9 +62,10 @@ That starts:
 
 ```bash
 npm run build
+npm start
 ```
 
-This builds the React frontend and the Rust release binary.
+This builds the React frontend and the Rust release binary, then launches the app from the local source checkout using the built assets.
 
 ## Architecture
 

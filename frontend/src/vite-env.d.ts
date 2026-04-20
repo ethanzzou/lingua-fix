@@ -16,6 +16,12 @@ type LinguaFixProcessRequest = {
   text: string
 }
 
+type LinguaFixPopupSession = {
+  mode: 'manual' | 'selection_translation'
+  input?: string
+  source_text?: string
+}
+
 type LinguaFixProcessResponse = {
   output: string
 }
@@ -71,6 +77,7 @@ interface Window {
     saveConfig: (config: LinguaFixConfig) => Promise<LinguaFixConfig>
     processText: (request: LinguaFixProcessRequest) => Promise<LinguaFixProcessResponse>
     hidePopup: () => Promise<void>
+    onPopupSession: (callback: (session: LinguaFixPopupSession) => void) => () => void
     onShowQuickTranslateOverlay: (callback: () => void) => () => void
   }
 }

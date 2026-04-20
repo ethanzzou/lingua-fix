@@ -9,6 +9,7 @@ const SERVICE_PORT = Number(process.env.LINGUAFIX_PORT || 8787);
 const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
 const IN_PLACE_TRANSLATE_HOTKEY = 'Control+Shift+T';
 const QUICK_TRANSLATE_POPUP_HOTKEY = 'Control+Shift+L';
+const SELECTION_TO_CHINESE_POPUP_HOTKEY = 'Control+Shift+R';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
 const execFile = promisify(require('node:child_process').execFile);
 const AUTOMATION_SHORTCUT_SETTLE_DELAY_MS = 220;
@@ -23,11 +24,19 @@ let popupHelperProcess = null;
 let serviceProcess = null;
 let ownsServiceProcess = false;
 let isQuitting = false;
-let isRunningSelectionReplace = false;
+let isRunningSelectionWorkflow = false;
 let statusBarItem = null;
 
 function isDev() {
   return !app.isPackaged;
+}
+
+function shouldOpenDevTools() {
+  return isDev() && process.env.LINGUAFIX_OPEN_DEVTOOLS === '1';
+}
+
+function shouldUseDevServer() {
+  return isDev() && process.env.LINGUAFIX_USE_DEV_SERVER === '1';
 }
 
 function isPopupHelperProcess() {
@@ -116,18 +125,54 @@ async function ensureRustService() {
 }
 
 async function callService(pathname, options = {}) {
+  await ensureRustService();
+
   const response = await fetch(`${SERVICE_URL}${pathname}`, {
     ...options,
     headers: {
-      'content-type': 'application/json',
+      accept: 'application/json',
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
   });
 
-  const payload = await response.json();
+  const rawBody = await response.text();
+  const contentType = response.headers.get('content-type') || '';
+  let payload = null;
+
+  if (rawBody) {
+    if (contentType.includes('application/json')) {
+      try {
+        payload = JSON.parse(rawBody);
+      } catch (error) {
+        throw new Error(
+          `Service returned invalid JSON (${response.status} ${response.statusText}).`,
+        );
+      }
+    } else {
+      try {
+        payload = JSON.parse(rawBody);
+      } catch (_) {
+        payload = { error: rawBody.trim() };
+      }
+    }
+  } else {
+    payload = {};
+  }
 
   if (!response.ok) {
-    throw new Error(payload.error || 'Service request failed.');
+    const message =
+      typeof payload?.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : `Service request failed (${response.status} ${response.statusText}).`;
+
+    throw new Error(message);
+  }
+
+  if (!contentType.includes('application/json') && rawBody) {
+    throw new Error(
+      `Service returned an unexpected response type (${response.status} ${response.statusText}).`,
+    );
   }
 
   return payload;
@@ -393,11 +438,11 @@ async function tryProcessSelectedTextInPlace() {
     return true;
   }
 
-  if (isRunningSelectionReplace) {
+  if (isRunningSelectionWorkflow) {
     return true;
   }
 
-  isRunningSelectionReplace = true;
+  isRunningSelectionWorkflow = true;
   let clipboardBackup = null;
 
   try {
@@ -436,14 +481,14 @@ async function tryProcessSelectedTextInPlace() {
     );
     return true;
   } finally {
-    isRunningSelectionReplace = false;
+    isRunningSelectionWorkflow = false;
   }
 }
 
 function rendererUrl(search = '') {
   const normalizedSearch = search ? `?${new URLSearchParams(search).toString()}` : '';
 
-  if (isDev()) {
+  if (shouldUseDevServer()) {
     return `http://127.0.0.1:5173/${normalizedSearch}`;
   }
 
@@ -539,7 +584,7 @@ function createWindow() {
 
   loadRenderer(mainWindow);
 
-  if (isDev()) {
+  if (shouldOpenDevTools()) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
 
@@ -643,7 +688,23 @@ function hideQuickTranslatePopup() {
   }
 }
 
-function showQuickTranslatePopup() {
+function sendPopupSession(session) {
+  const window = createPopupWindow();
+  const dispatch = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send('linguafix:popup-session', session);
+    }
+  };
+
+  if (window.webContents.isLoading()) {
+    window.webContents.once('did-finish-load', dispatch);
+    return;
+  }
+
+  dispatch();
+}
+
+function showQuickTranslatePopup(session = { mode: 'manual' }) {
   const window = createPopupWindow();
 
   if (window.isMinimized()) {
@@ -658,6 +719,16 @@ function showQuickTranslatePopup() {
   if (process.platform !== 'darwin') {
     window.focus();
   }
+
+  sendPopupSession(session);
+}
+
+function showSelectedTextTranslationPopup(sourceText, output) {
+  showQuickTranslatePopup({
+    mode: 'selection_translation',
+    input: output,
+    source_text: sourceText,
+  });
 }
 
 function toggleQuickTranslatePopup() {
@@ -672,6 +743,55 @@ function toggleQuickTranslatePopup() {
   showQuickTranslatePopup();
 }
 
+async function tryTranslateSelectedTextToChineseInPopup() {
+  if (process.platform !== 'darwin') {
+    notify('Selection translation popup is currently supported on macOS only.');
+    return true;
+  }
+
+  if (isRunningSelectionWorkflow) {
+    return true;
+  }
+
+  isRunningSelectionWorkflow = true;
+  let clipboardBackup = null;
+
+  try {
+    const selectionState = await readSelectedTextFromMacApp();
+    clipboardBackup = selectionState.clipboardBackup;
+    const selectedText = selectionState.selectedText.trim();
+
+    if (!selectedText) {
+      clipboard.writeText(clipboardBackup);
+      notify('Could not read the current text selection.');
+      return true;
+    }
+
+    const response = await callService('/api/process', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: 'translate_english_to_chinese',
+        text: selectedText,
+      }),
+    });
+
+    clipboard.writeText(clipboardBackup);
+    showSelectedTextTranslationPopup(selectedText, response.output);
+    return true;
+  } catch (error) {
+    if (typeof clipboardBackup === 'string') {
+      clipboard.writeText(clipboardBackup);
+    }
+
+    notify(
+      error instanceof Error ? error.message : 'Could not translate the selected text.',
+    );
+    return true;
+  } finally {
+    isRunningSelectionWorkflow = false;
+  }
+}
+
 function registerGlobalHotkeys() {
   globalShortcut.register(IN_PLACE_TRANSLATE_HOTKEY, async () => {
     await tryProcessSelectedTextInPlace();
@@ -679,6 +799,10 @@ function registerGlobalHotkeys() {
 
   globalShortcut.register(QUICK_TRANSLATE_POPUP_HOTKEY, () => {
     toggleQuickTranslatePopup();
+  });
+
+  globalShortcut.register(SELECTION_TO_CHINESE_POPUP_HOTKEY, async () => {
+    await tryTranslateSelectedTextToChineseInPopup();
   });
 }
 
@@ -724,6 +848,12 @@ function buildStatusBarMenu() {
       label: 'Quick Translate',
       click: () => {
         showQuickTranslatePopup();
+      },
+    },
+    {
+      label: 'Translate Selection to Chinese',
+      click: async () => {
+        await tryTranslateSelectedTextToChineseInPopup();
       },
     },
     {
