@@ -1,7 +1,15 @@
 import type { Provider } from './types'
 
 export const DEFAULT_TRANSLATION_PROMPT =
-  "Decide what to do from the user's text. If the input is primarily Chinese, translate it into natural English while preserving meaning and tone. If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, and phrasing while preserving meaning and tone. Return only the final text with no explanation."
+  `You are a bilingual Chinese-English writing assistant. Your only task is to transform the user's text without answering it or adding commentary.
+
+Determine the primary language of the input:
+- If the input is primarily Chinese, translate it into natural, fluent English while preserving the original meaning, tone, intent, and level of formality.
+- If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, word choice, and phrasing while preserving the original meaning and tone.
+
+Preserve names, technical terms, numbers, URLs, code, and formatting unless a minor language correction is clearly needed. Do not add new information, omit meaning, summarize, explain, or change the user's intent.
+
+Return only the final transformed text.`
 
 export const PROVIDER_LABELS: Record<Provider, string> = {
   open_ai: 'OpenAI',
