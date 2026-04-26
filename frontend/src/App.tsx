@@ -1,127 +1,42 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DEFAULT_HISTORY_QUERY,
+  HISTORY_PAGE_SIZE_OPTIONS,
+  formatHistoryTimestamp,
+  getHistoryGroups,
+  parseTagDraft,
+} from './history'
+import { getLinguaFixClient } from './linguafixClient'
+import {
+  DEFAULT_TRANSLATION_PROMPT,
+  PROVIDER_BASE_URL_HINTS,
+  PROVIDER_BASE_URL_PLACEHOLDERS,
+  PROVIDER_KEY_HINTS,
+  PROVIDER_KEY_LABELS,
+  PROVIDER_KEY_PLACEHOLDERS,
+  PROVIDER_LABELS,
+  PROVIDER_MODEL_PLACEHOLDERS,
+} from './providers'
+import type {
+  AppConfig,
+  BookmarkStatusFilter,
+  GroupMode,
+  HistoryPagination,
+  HistoryQuery,
+  HistoryRecord,
+  HistorySort,
+  HistoryTagSummary,
+  PopupMode,
+  Provider,
+  StatusKind,
+  TaskKind,
+} from './types'
 import './App.css'
-
-type TaskKind = 'auto_process'
-type PopupMode = 'manual' | 'selection_translation'
-
-type Provider = 'open_ai' | 'gemini_ai_studio' | 'gemini_vertex' | 'custom_open_ai'
-
-type AppConfig = {
-  provider: Provider
-  api_key: string
-  model: string
-  base_url: string
-  translation_prompt: string
-  data_dir: string
-}
-
-type HistoryRecord = {
-  id: number
-  original_text: string
-  translated_text: string
-  created_at: number
-  is_bookmarked: boolean
-  tags: string[]
-}
-
-type HistoryTagSummary = {
-  name: string
-  count: number
-}
-
-type HistoryPagination = {
-  page: number
-  page_size: number
-  total_records: number
-  total_pages: number
-}
-
-type HistorySort = 'newest' | 'oldest'
-type BookmarkStatusFilter = 'all' | 'bookmarked' | 'unbookmarked'
-
-type GroupMode = 'none' | 'day' | 'week' | 'month'
-
-type HistoryQuery = {
-  page: number
-  page_size: number
-  search: string
-  tag: string
-  bookmark_status: BookmarkStatusFilter
-  sort: HistorySort
-}
-
-const DEFAULT_TRANSLATION_PROMPT =
-  "Decide what to do from the user's text. If the input is primarily Chinese, translate it into natural English while preserving meaning and tone. If the input is primarily English, rewrite it into correct, natural English with improved grammar, spelling, punctuation, and phrasing while preserving meaning and tone. Return only the final text with no explanation."
-
-const PROVIDER_LABELS: Record<Provider, string> = {
-  open_ai: 'OpenAI',
-  gemini_ai_studio: 'Gemini AI Studio',
-  gemini_vertex: 'Gemini Vertex AI',
-  custom_open_ai: 'Custom (OpenAI-compatible)',
-}
-
-const PROVIDER_KEY_LABELS: Record<Provider, string> = {
-  open_ai: 'OpenAI API key',
-  gemini_ai_studio: 'Google AI Studio API key',
-  gemini_vertex: 'Google Cloud API key or OAuth access token',
-  custom_open_ai: 'API key',
-}
-
-const PROVIDER_KEY_PLACEHOLDERS: Record<Provider, string> = {
-  open_ai: 'sk-...',
-  gemini_ai_studio: 'AIza...',
-  gemini_vertex: 'AIza... or gcloud auth print-access-token',
-  custom_open_ai: 'API key',
-}
-
-const PROVIDER_KEY_HINTS: Partial<Record<Provider, string>> = {
-  gemini_vertex:
-    'Vertex accepts a Google Cloud API key or an OAuth token. AI Studio API keys do not work here.',
-}
-
-const PROVIDER_MODEL_PLACEHOLDERS: Record<Provider, string> = {
-  open_ai: 'gpt-4.1-mini',
-  gemini_ai_studio: 'gemini-2.0-flash',
-  gemini_vertex: 'gemini-2.0-flash',
-  custom_open_ai: 'model name',
-}
-
-const PROVIDER_BASE_URL_PLACEHOLDERS: Record<Provider, string> = {
-  open_ai: '',
-  gemini_ai_studio: '',
-  gemini_vertex:
-    'https://aiplatform.googleapis.com/v1/projects/MY_PROJECT/locations/global',
-  custom_open_ai: 'https://api.together.xyz',
-}
-
-const PROVIDER_BASE_URL_HINTS: Partial<Record<Provider, string>> = {
-  gemini_vertex:
-    'Optional. Leave this blank to use your active gcloud project, or the global express-mode endpoint when using only a Vertex API key.',
-  custom_open_ai:
-    'Required for deployed Model Garden OpenAI-compatible endpoints and other OpenAI-style APIs.',
-}
-
-type StatusKind = 'idle' | 'loading' | 'success' | 'error'
 
 type Page = 'main' | 'history' | 'settings'
 
-const HISTORY_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat(undefined, {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-})
-
-const HISTORY_PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
-
-const DEFAULT_HISTORY_QUERY: HistoryQuery = {
-  page: 1,
-  page_size: 12,
-  search: '',
-  tag: '',
-  bookmark_status: 'all',
-  sort: 'newest',
-}
-
 function App() {
+  const linguafix = useMemo(() => getLinguaFixClient(), [])
   const isQuickTranslatePopup =
     new URLSearchParams(window.location.search).get('popup') === 'quick-translate'
   const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
@@ -151,7 +66,7 @@ function App() {
   const [availableTags, setAvailableTags] = useState<HistoryTagSummary[]>([])
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyError, setHistoryError] = useState('')
-  const [historyBusyIds, setHistoryBusyIds] = useState<number[]>([])
+  const [historyBusyIds, setHistoryBusyIds] = useState<Set<number>>(() => new Set())
   const [historyClearing, setHistoryClearing] = useState(false)
   const [historyTagDrafts, setHistoryTagDrafts] = useState<Record<number, string>>({})
   const [loading, setLoading] = useState(true)
@@ -162,12 +77,19 @@ function App() {
     kind: 'idle',
     text: '',
   })
+  const hasInput = input.trim().length > 0
+  const canRunTask = hasInput && !busy && !loading
+  const historyGroups = useMemo(
+    () => getHistoryGroups(history, historyGroupBy),
+    [history, historyGroupBy],
+  )
+  const textStats = useMemo(() => getTextStats(input), [input])
 
-  async function loadHistory(nextQuery: HistoryQuery) {
+  const loadHistory = useCallback(async (nextQuery: HistoryQuery) => {
     setHistoryError('')
 
     try {
-      const response = await window.linguafix.getHistory({
+      const response = await linguafix.getHistory({
         page: nextQuery.page,
         page_size: nextQuery.page_size,
         search: nextQuery.search || undefined,
@@ -194,10 +116,10 @@ function App() {
     } finally {
       setHistoryLoading(false)
     }
-  }
+  }, [linguafix])
 
   useEffect(() => {
-    window.linguafix
+    linguafix
       .getConfig()
       .then((nextConfig) => {
         setConfig(nextConfig)
@@ -209,14 +131,14 @@ function App() {
       })
 
     void loadHistory(DEFAULT_HISTORY_QUERY)
-  }, [])
+  }, [linguafix, loadHistory])
 
   useEffect(() => {
     if (!isQuickTranslatePopup) {
       return
     }
 
-    const unsubscribe = window.linguafix.onPopupSession((session) => {
+    const unsubscribe = linguafix.onPopupSession((session) => {
       setPopupMode(session.mode)
 
       if (typeof session.input === 'string') {
@@ -244,18 +166,18 @@ function App() {
       unsubscribe()
       window.removeEventListener('focus', handleVisibility)
     }
-  }, [isQuickTranslatePopup])
+  }, [isQuickTranslatePopup, linguafix])
 
   useEffect(() => {
     if (isQuickTranslatePopup) {
       return
     }
 
-    return window.linguafix.onShowQuickTranslateOverlay(() => {
+    return linguafix.onShowQuickTranslateOverlay(() => {
       setShowQuickTranslateOverlay(true)
       window.setTimeout(() => overlayInputRef.current?.focus(), 0)
     })
-  }, [isQuickTranslatePopup])
+  }, [isQuickTranslatePopup, linguafix])
 
   useEffect(() => {
     if (!showQuickTranslateOverlay) {
@@ -269,7 +191,7 @@ function App() {
     setConfig(nextConfig)
 
     try {
-      const savedConfig = await window.linguafix.saveConfig(nextConfig)
+      const savedConfig = await linguafix.saveConfig(nextConfig)
       setConfig(savedConfig)
       setHistoryLoading(true)
       await loadHistory(historyQuery)
@@ -294,7 +216,7 @@ function App() {
     })
 
     try {
-      const response = await window.linguafix.processText({ task, text: input })
+      const response = await linguafix.processText({ task, text: input })
       setInput(response.output)
       setHistoryLoading(true)
       await loadHistory(historyQuery)
@@ -335,7 +257,7 @@ function App() {
 
   async function hideQuickTranslatePopup() {
     try {
-      await window.linguafix.hidePopup()
+      await linguafix.hidePopup()
     } catch {
       // Ignore close errors.
     }
@@ -345,12 +267,22 @@ function App() {
     setShowQuickTranslateOverlay(false)
   }
 
-  function formatHistoryTimestamp(unixSeconds: number) {
-    return HISTORY_TIMESTAMP_FORMATTER.format(new Date(unixSeconds * 1000))
-  }
-
   function setHistoryTagDraft(id: number, value: string) {
     setHistoryTagDrafts((current) => ({ ...current, [id]: value }))
+  }
+
+  function setHistoryRecordBusy(id: number, isBusy: boolean) {
+    setHistoryBusyIds((current) => {
+      const next = new Set(current)
+
+      if (isBusy) {
+        next.add(id)
+      } else {
+        next.delete(id)
+      }
+
+      return next
+    })
   }
 
   async function refreshHistory(showSuccess = false) {
@@ -372,10 +304,10 @@ function App() {
       return
     }
 
-    setHistoryBusyIds((current) => [...current, record.id])
+    setHistoryRecordBusy(record.id, true)
 
     try {
-      await window.linguafix.deleteHistoryRecord(record.id)
+      await linguafix.deleteHistoryRecord(record.id)
       setHistoryLoading(true)
       const ok = await loadHistory(historyQuery)
       if (!ok) {
@@ -391,7 +323,7 @@ function App() {
       const message = error instanceof Error ? error.message : 'Could not delete history record.'
       setStatus({ kind: 'error', text: message })
     } finally {
-      setHistoryBusyIds((current) => current.filter((value) => value !== record.id))
+      setHistoryRecordBusy(record.id, false)
     }
   }
 
@@ -407,7 +339,7 @@ function App() {
     setHistoryClearing(true)
 
     try {
-      await window.linguafix.clearHistory()
+      await linguafix.clearHistory()
       setHistoryLoading(true)
       const ok = await loadHistory({ ...historyQuery, page: 1 })
       if (!ok) {
@@ -449,30 +381,11 @@ function App() {
     }
   }
 
-  function parseTagDraft(value: string) {
-    const seen = new Set<string>()
-    const tags: string[] = []
-
-    for (const piece of value.split(',')) {
-      const compact = piece.trim().replace(/\s+/g, ' ')
-      const normalized = compact.toLowerCase()
-
-      if (!compact || seen.has(normalized)) {
-        continue
-      }
-
-      seen.add(normalized)
-      tags.push(compact)
-    }
-
-    return tags
-  }
-
   async function updateHistoryTags(id: number, nextTags: string[]) {
-    setHistoryBusyIds((current) => [...current, id])
+    setHistoryRecordBusy(id, true)
 
     try {
-      await window.linguafix.updateHistoryRecordTags(id, nextTags)
+      await linguafix.updateHistoryRecordTags(id, nextTags)
       setHistoryLoading(true)
       const ok = await loadHistory(historyQuery)
       if (!ok) {
@@ -483,15 +396,15 @@ function App() {
       const message = error instanceof Error ? error.message : 'Could not update tags.'
       setStatus({ kind: 'error', text: message })
     } finally {
-      setHistoryBusyIds((current) => current.filter((value) => value !== id))
+      setHistoryRecordBusy(id, false)
     }
   }
 
   async function toggleHistoryBookmark(record: HistoryRecord) {
-    setHistoryBusyIds((current) => [...current, record.id])
+    setHistoryRecordBusy(record.id, true)
 
     try {
-      await window.linguafix.setHistoryRecordBookmark(record.id, !record.is_bookmarked)
+      await linguafix.setHistoryRecordBookmark(record.id, !record.is_bookmarked)
       setHistoryLoading(true)
       const ok = await loadHistory(historyQuery)
       if (!ok) {
@@ -506,7 +419,7 @@ function App() {
         error instanceof Error ? error.message : 'Could not update bookmark state.'
       setStatus({ kind: 'error', text: message })
     } finally {
-      setHistoryBusyIds((current) => current.filter((value) => value !== record.id))
+      setHistoryRecordBusy(record.id, false)
     }
   }
 
@@ -534,32 +447,6 @@ function App() {
       id,
       currentTags.filter((tag) => tag !== tagToRemove),
     )
-  }
-
-  function getHistoryGroups(records: HistoryRecord[]) {
-    if (historyGroupBy === 'none') {
-      return [{ key: 'all', label: 'All Records', records }]
-    }
-
-    const groups = new Map<string, { label: string; records: HistoryRecord[] }>()
-    for (const record of records) {
-      const date = new Date(record.created_at * 1000)
-      const key = historyGroupKey(date, historyGroupBy)
-      const label = historyGroupLabel(date, historyGroupBy)
-      const current = groups.get(key)
-
-      if (current) {
-        current.records.push(record)
-      } else {
-        groups.set(key, { label, records: [record] })
-      }
-    }
-
-    return Array.from(groups.entries()).map(([key, group]) => ({
-      key,
-      label: group.label,
-      records: group.records,
-    }))
   }
 
   const pageTitle =
@@ -623,6 +510,36 @@ function App() {
       : { kind: 'idle' as StatusKind, text: 'Ready' }
   })()
 
+  function renderTextActionButtons({
+    includeUndo = true,
+    includeImprove = true,
+  }: {
+    includeUndo?: boolean
+    includeImprove?: boolean
+  } = {}) {
+    return (
+      <>
+        <button className="toolbar-chip" disabled={!hasInput} onClick={() => void copyOutput()}>
+          Copy
+        </button>
+        {includeUndo ? (
+          <button className="toolbar-chip" disabled={!previousInput} onClick={undoLastChange}>
+            Undo
+          </button>
+        ) : null}
+        {includeImprove ? (
+          <button
+            className="toolbar-chip toolbar-chip-primary"
+            disabled={!canRunTask}
+            onClick={() => void runTask('auto_process')}
+          >
+            Improve
+          </button>
+        ) : null}
+      </>
+    )
+  }
+
   if (isQuickTranslatePopup) {
     return (
       <div className={`app-frame popup-frame${isMac ? ' macos-frame' : ''}`}>
@@ -650,6 +567,7 @@ function App() {
 
               if (
                 !isSelectionTranslationPopup &&
+                canRunTask &&
                 (event.metaKey || event.ctrlKey) &&
                 event.key === 'Enter'
               ) {
@@ -659,8 +577,8 @@ function App() {
             }}
             placeholder={
               isSelectionTranslationPopup
-                ? 'Translated Chinese text will appear here.'
-                : 'Paste or type text to improve…'
+                ? 'Chinese translation'
+                : 'Text to improve'
             }
           />
         </div>
@@ -670,27 +588,10 @@ function App() {
             {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
           </div>
           <div className="popup-footer-actions">
-            <button className="toolbar-chip" onClick={() => void copyOutput()}>
-              Copy
-            </button>
-            {!isSelectionTranslationPopup ? (
-              <>
-                <button
-                  className="toolbar-chip"
-                  disabled={!previousInput}
-                  onClick={undoLastChange}
-                >
-                  Undo
-                </button>
-                <button
-                  className="toolbar-chip toolbar-chip-primary"
-                  disabled={busy || loading}
-                  onClick={() => void runTask('auto_process')}
-                >
-                  Improve
-                </button>
-              </>
-            ) : null}
+            {renderTextActionButtons({
+              includeUndo: !isSelectionTranslationPopup,
+              includeImprove: !isSelectionTranslationPopup,
+            })}
           </div>
         </footer>
       </div>
@@ -724,19 +625,7 @@ function App() {
 
           {page === 'main' ? (
             <>
-              <button className="toolbar-chip" onClick={() => void copyOutput()}>
-                Copy
-              </button>
-              <button className="toolbar-chip" disabled={!previousInput} onClick={undoLastChange}>
-                Undo
-              </button>
-              <button
-                className="toolbar-chip toolbar-chip-primary"
-                disabled={busy || loading}
-                onClick={() => void runTask('auto_process')}
-              >
-                Improve
-              </button>
+              {renderTextActionButtons()}
               <button className="toolbar-chip" onClick={() => setPage('history')}>
                 History
               </button>
@@ -754,7 +643,7 @@ function App() {
                 disabled={historyLoading || historyClearing || history.length === 0}
                 onClick={() => void clearHistory()}
               >
-                Clear All
+                Clear
               </button>
               <button className="toolbar-chip" onClick={() => setPage('settings')}>
                 Settings
@@ -773,13 +662,12 @@ function App() {
         </div>
       </header>
 
-      <div className="app-shell">
+      <div className={`app-shell app-shell-${page}`}>
         {page === 'settings' ? (
           <section className="panel settings-panel">
             <div className="panel-heading">
               <div>
                 <h2 data-index="01">Application Settings</h2>
-                <p>Managed by the Rust service and saved in your local config folder.</p>
               </div>
               {loading ? (
                 <span className="badge muted">Loading</span>
@@ -913,7 +801,6 @@ function App() {
             <div className="panel-heading">
               <div>
                 <h2 data-index="02">Translation History</h2>
-                <p>Browse, filter, paginate, group, tag, bookmark, delete, or clear saved records.</p>
               </div>
               {historyLoading ? (
                 <span className="badge muted">Loading</span>
@@ -1067,12 +954,12 @@ function App() {
 
             {!historyLoading && !historyError && historyPagination.total_records === 0 ? (
               <div className="history-empty history-empty-page">
-                Translation records will appear here after you run the first request.
+                No translation records yet.
               </div>
             ) : (
               <>
                 <div className="history-group-list">
-                  {getHistoryGroups(history).map((group) => (
+                  {historyGroups.map((group) => (
                     <section key={group.key} className="history-group">
                       <div className="history-group-header">
                         <h3>{group.label}</h3>
@@ -1081,7 +968,7 @@ function App() {
 
                       <div className="history-list history-list-page">
                         {group.records.map((record) => {
-                          const busy = historyClearing || historyBusyIds.includes(record.id)
+                          const busy = historyClearing || historyBusyIds.has(record.id)
 
                           return (
                             <article key={record.id} className="history-card history-card-page">
@@ -1154,7 +1041,7 @@ function App() {
                                     onChange={(event) =>
                                       setHistoryTagDraft(record.id, event.target.value)
                                     }
-                                    placeholder="Add tags (comma separated)"
+                                    placeholder="Tags"
                                     disabled={busy}
                                   />
                                   <button className="toolbar-chip" disabled={busy} type="submit">
@@ -1200,18 +1087,28 @@ function App() {
           </section>
         ) : (
           <div className="main-body">
-            <textarea
-              className="main-textarea"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-                  event.preventDefault()
-                  void runTask('auto_process')
-                }
-              }}
-              placeholder="Paste or write something. Press ⌘↵ to improve it."
-            />
+            <div className="editor-surface">
+              <div className="editor-meta">
+                <span>{textStats.words} Words</span>
+                <span>{textStats.characters} Characters</span>
+              </div>
+              <textarea
+                className="main-textarea"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (
+                    canRunTask &&
+                    (event.metaKey || event.ctrlKey) &&
+                    event.key === 'Enter'
+                  ) {
+                    event.preventDefault()
+                    void runTask('auto_process')
+                  }
+                }}
+                placeholder="Draft text"
+              />
+            </div>
 
             <div className="main-footer">
               {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
@@ -1247,12 +1144,12 @@ function App() {
                     closeQuickTranslateOverlay()
                   }
 
-                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  if (canRunTask && (event.metaKey || event.ctrlKey) && event.key === 'Enter') {
                     event.preventDefault()
                     void runTask('auto_process')
                   }
                 }}
-                placeholder="Paste or type text to improve…"
+                placeholder="Text to improve"
               />
             </div>
 
@@ -1261,19 +1158,7 @@ function App() {
                 {status.text ? <div className={`status ${status.kind}`}>{status.text}</div> : null}
               </div>
               <div className="popup-footer-actions">
-                <button className="toolbar-chip" disabled={!previousInput} onClick={undoLastChange}>
-                  Undo
-                </button>
-                <button className="toolbar-chip" onClick={() => void copyOutput()}>
-                  Copy
-                </button>
-                <button
-                  className="toolbar-chip toolbar-chip-primary"
-                  disabled={busy || loading}
-                  onClick={() => void runTask('auto_process')}
-                >
-                  Improve
-                </button>
+                {renderTextActionButtons()}
               </div>
             </footer>
           </div>
@@ -1299,67 +1184,13 @@ function ChevronRightIcon() {
   )
 }
 
-function historyGroupKey(date: Date, groupBy: GroupMode) {
-  if (groupBy === 'month') {
-    return `${date.getFullYear()}-${date.getMonth()}`
+function getTextStats(value: string) {
+  const words = value.trim() ? value.trim().split(/\s+/).length : 0
+
+  return {
+    characters: value.length,
+    words,
   }
-
-  if (groupBy === 'week') {
-    const start = startOfWeek(date)
-    return `${start.getFullYear()}-${start.getMonth()}-${start.getDate()}`
-  }
-
-  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
-}
-
-function historyGroupLabel(date: Date, groupBy: GroupMode) {
-  if (groupBy === 'month') {
-    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
-  }
-
-  if (groupBy === 'week') {
-    return `Week of ${startOfWeek(date).toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })}`
-  }
-
-  const today = new Date()
-  const yesterday = new Date()
-  yesterday.setDate(today.getDate() - 1)
-
-  if (isSameDay(date, today)) {
-    return 'Today'
-  }
-
-  if (isSameDay(date, yesterday)) {
-    return 'Yesterday'
-  }
-
-  return date.toLocaleDateString(undefined, {
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
-}
-
-function startOfWeek(date: Date) {
-  const result = new Date(date)
-  const day = result.getDay()
-  const delta = day === 0 ? -6 : 1 - day
-  result.setDate(result.getDate() + delta)
-  result.setHours(0, 0, 0, 0)
-  return result
-}
-
-function isSameDay(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  )
 }
 
 export default App
