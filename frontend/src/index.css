@@ -43,10 +43,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(1000px 520px at 88% -8%, rgba(43, 109, 229, 0.07), transparent 58%),
-    radial-gradient(900px 540px at -10% 110%, rgba(15, 23, 42, 0.05), transparent 62%),
-    var(--paper);
+  background: linear-gradient(180deg, var(--paper-soft-alt), var(--paper));
   position: relative;
 }
 
@@ -67,7 +64,7 @@ h1 {
   font-weight: 600;
   font-size: clamp(2.75rem, 5vw, 4.6rem);
   line-height: 0.98;
-  letter-spacing: -0.05em;
+  letter-spacing: 0;
   color: var(--ink);
 }
 
@@ -75,7 +72,7 @@ h2 {
   font-family: var(--sans);
   font-weight: 600;
   font-size: 1.4rem;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   color: var(--ink);
 }
 
