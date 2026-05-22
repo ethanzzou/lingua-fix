@@ -39,8 +39,8 @@ export const PROVIDER_KEY_HINTS: Partial<Record<Provider, string>> = {
 
 export const PROVIDER_MODEL_PLACEHOLDERS: Record<Provider, string> = {
   open_ai: 'gpt-4.1-mini',
-  gemini_ai_studio: 'gemini-2.0-flash',
-  gemini_vertex: 'gemini-2.0-flash',
+  gemini_ai_studio: 'gemini-3.5-flash',
+  gemini_vertex: 'gemini-3.5-flash',
   custom_open_ai: 'model name',
 }
 

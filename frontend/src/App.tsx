@@ -667,131 +667,144 @@ function App() {
           <section className="panel settings-panel">
             <div className="panel-heading">
               <div>
-                <h2 data-index="01">Application Settings</h2>
+                <h2>Application Settings</h2>
               </div>
-              {loading ? (
-                <span className="badge muted">Loading</span>
-              ) : (
-                <span className="badge">Ready</span>
-              )}
             </div>
 
             <div className="settings-grid">
-              <label>
+              <label className="settings-row">
                 <span>Provider</span>
-                <select
-                  value={config.provider}
-                  onChange={(event) => {
-                    const provider = event.target.value as Provider
-                    const nextConfig = { ...config, provider, api_key: '', model: '', base_url: '' }
-                    setConfig(nextConfig)
-                    void persistConfig(nextConfig)
-                  }}
-                >
-                  {(Object.keys(PROVIDER_LABELS) as Provider[]).map((p) => (
-                    <option key={p} value={p}>
-                      {PROVIDER_LABELS[p]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                <span>{PROVIDER_KEY_LABELS[config.provider]}</span>
-                <input
-                  type="password"
-                  value={config.api_key}
-                  onChange={(event) =>
-                    setConfig((current) => ({ ...current, api_key: event.target.value }))
-                  }
-                  onBlur={() => void persistConfig(config)}
-                  placeholder={PROVIDER_KEY_PLACEHOLDERS[config.provider]}
-                />
-                {PROVIDER_KEY_HINTS[config.provider] && (
-                  <small>{PROVIDER_KEY_HINTS[config.provider]}</small>
-                )}
-              </label>
-
-              <label>
-                <span>Model</span>
-                <input
-                  type="text"
-                  value={config.model}
-                  onChange={(event) =>
-                    setConfig((current) => ({ ...current, model: event.target.value }))
-                  }
-                  onBlur={() => void persistConfig(config)}
-                  placeholder={PROVIDER_MODEL_PLACEHOLDERS[config.provider]}
-                />
-              </label>
-
-              {(config.provider === 'gemini_vertex' || config.provider === 'custom_open_ai') && (
-                <label>
-                  <span>{config.provider === 'gemini_vertex' ? 'Vertex endpoint (optional)' : 'Base URL'}</span>
-                  <input
-                    type="text"
-                    value={config.base_url}
-                    onChange={(event) =>
-                      setConfig((current) => ({ ...current, base_url: event.target.value }))
-                    }
-                    onBlur={() => void persistConfig(config)}
-                    placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[config.provider]}
-                  />
-                  <small>{PROVIDER_BASE_URL_HINTS[config.provider]}</small>
-                </label>
-              )}
-
-              <label className="settings-field-wide">
-                <span>Data directory</span>
-                <input
-                  type="text"
-                  value={config.data_dir}
-                  onChange={(event) =>
-                    setConfig((current) => ({ ...current, data_dir: event.target.value }))
-                  }
-                  onBlur={() => void persistConfig(config)}
-                  placeholder="/path/to/LinguaFix"
-                />
-                <small>
-                  Translation logs are stored in <code>translations.sqlite3</code> in this
-                  directory. Entries older than one year are removed automatically unless
-                  bookmarked.
-                </small>
-              </label>
-
-              <label className="settings-field-wide">
-                <span>Translation prompt</span>
-                <textarea
-                  value={config.translation_prompt}
-                  onChange={(event) =>
-                    setConfig((current) => ({
-                      ...current,
-                      translation_prompt: event.target.value,
-                    }))
-                  }
-                  onBlur={() => void persistConfig(config)}
-                  placeholder={DEFAULT_TRANSLATION_PROMPT}
-                  rows={7}
-                />
-                <small>
-                  Used as the system prompt for translation and English rewriting across all
-                  providers.
-                </small>
-                <div className="settings-action-row">
-                  <button
-                    type="button"
-                    className="toolbar-chip"
-                    onClick={() => {
+                <div className="settings-control">
+                  <select
+                    value={config.provider}
+                    onChange={(event) => {
+                      const provider = event.target.value as Provider
                       const nextConfig = {
                         ...config,
-                        translation_prompt: DEFAULT_TRANSLATION_PROMPT,
+                        provider,
+                        api_key: '',
+                        model: '',
+                        base_url: '',
                       }
                       setConfig(nextConfig)
                       void persistConfig(nextConfig)
                     }}
                   >
-                    Reset prompt
-                  </button>
+                    {(Object.keys(PROVIDER_LABELS) as Provider[]).map((p) => (
+                      <option key={p} value={p}>
+                        {PROVIDER_LABELS[p]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </label>
+
+              <label className="settings-row">
+                <span>Model</span>
+                <div className="settings-control">
+                  <input
+                    type="text"
+                    value={config.model}
+                    onChange={(event) =>
+                      setConfig((current) => ({ ...current, model: event.target.value }))
+                    }
+                    onBlur={() => void persistConfig(config)}
+                    placeholder={PROVIDER_MODEL_PLACEHOLDERS[config.provider]}
+                  />
+                </div>
+              </label>
+
+              <label className="settings-row">
+                <span>{PROVIDER_KEY_LABELS[config.provider]}</span>
+                <div className="settings-control">
+                  <input
+                    type="password"
+                    value={config.api_key}
+                    onChange={(event) =>
+                      setConfig((current) => ({ ...current, api_key: event.target.value }))
+                    }
+                    onBlur={() => void persistConfig(config)}
+                    placeholder={PROVIDER_KEY_PLACEHOLDERS[config.provider]}
+                  />
+                  {PROVIDER_KEY_HINTS[config.provider] && (
+                    <small>{PROVIDER_KEY_HINTS[config.provider]}</small>
+                  )}
+                </div>
+              </label>
+
+              {(config.provider === 'gemini_vertex' || config.provider === 'custom_open_ai') && (
+                <label className="settings-row">
+                  <span>{config.provider === 'gemini_vertex' ? 'Vertex endpoint' : 'Base URL'}</span>
+                  <div className="settings-control">
+                    <input
+                      type="text"
+                      value={config.base_url}
+                      onChange={(event) =>
+                        setConfig((current) => ({ ...current, base_url: event.target.value }))
+                      }
+                      onBlur={() => void persistConfig(config)}
+                      placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[config.provider]}
+                    />
+                    <small>{PROVIDER_BASE_URL_HINTS[config.provider]}</small>
+                  </div>
+                </label>
+              )}
+
+              <label className="settings-row">
+                <span>Data directory</span>
+                <div className="settings-control">
+                  <input
+                    type="text"
+                    value={config.data_dir}
+                    onChange={(event) =>
+                      setConfig((current) => ({ ...current, data_dir: event.target.value }))
+                    }
+                    onBlur={() => void persistConfig(config)}
+                    placeholder="/path/to/LinguaFix"
+                  />
+                  <small>
+                    Translation logs are stored in <code>translations.sqlite3</code> in this
+                    directory. Entries older than one year are removed automatically unless
+                    bookmarked.
+                  </small>
+                </div>
+              </label>
+
+              <label className="settings-row settings-row-prompt">
+                <span>Translation prompt</span>
+                <div className="settings-control">
+                  <textarea
+                    value={config.translation_prompt}
+                    onChange={(event) =>
+                      setConfig((current) => ({
+                        ...current,
+                        translation_prompt: event.target.value,
+                      }))
+                    }
+                    onBlur={() => void persistConfig(config)}
+                    placeholder={DEFAULT_TRANSLATION_PROMPT}
+                    rows={7}
+                  />
+                  <small>
+                    Used as the system prompt for translation and English rewriting across all
+                    providers.
+                  </small>
+                  <div className="settings-action-row">
+                    <button
+                      type="button"
+                      className="toolbar-chip"
+                      onClick={() => {
+                        const nextConfig = {
+                          ...config,
+                          translation_prompt: DEFAULT_TRANSLATION_PROMPT,
+                        }
+                        setConfig(nextConfig)
+                        void persistConfig(nextConfig)
+                      }}
+                    >
+                      Reset prompt
+                    </button>
+                  </div>
                 </div>
               </label>
             </div>

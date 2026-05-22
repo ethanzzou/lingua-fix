@@ -412,7 +412,7 @@ impl Provider {
     fn default_model(&self) -> &'static str {
         match self {
             Self::OpenAi => "gpt-4.1-mini",
-            Self::GeminiAiStudio | Self::GeminiVertex => "gemini-2.0-flash",
+            Self::GeminiAiStudio | Self::GeminiVertex => "gemini-3.5-flash",
             Self::CustomOpenAi => "",
         }
     }

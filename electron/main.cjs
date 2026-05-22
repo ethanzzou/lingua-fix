@@ -11,11 +11,11 @@ const IN_PLACE_TRANSLATE_HOTKEY = 'Control+Shift+T';
 const QUICK_TRANSLATE_POPUP_HOTKEY = 'Control+Shift+L';
 const SELECTION_TO_CHINESE_POPUP_HOTKEY = 'Control+Shift+R';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
+const WINDOW_BACKGROUND_COLOR = '#f5f6f8';
 const execFile = promisify(require('node:child_process').execFile);
-const AUTOMATION_SHORTCUT_SETTLE_DELAY_MS = 220;
-const AUTOMATION_COPY_POLL_ATTEMPTS = 15;
-const AUTOMATION_COPY_POLL_DELAY_MS = 100;
-const AUTOMATION_PASTE_RESTORE_DELAY_MS = 180;
+const AUTOMATION_COPY_POLL_ATTEMPTS = 10;
+const AUTOMATION_COPY_POLL_DELAY_MS = 30;
+const AUTOMATION_PASTE_RESTORE_DELAY_MS = 80;
 
 let mainWindow = null;
 let popupWindow = null;
@@ -226,96 +226,72 @@ async function triggerMacSelectionShortcut(key) {
   `);
 }
 
-async function getFrontmostMacAppName() {
-  return runAppleScript(`
-    tell application "System Events"
-      name of first application process whose frontmost is true
-    end tell
-  `);
+function parseMacAppIdentity(rawIdentity) {
+  const [name = '', bundleIdentifier = '', pidText = ''] = rawIdentity.split('\n');
+  const pid = Number.parseInt(pidText, 10);
+
+  return {
+    name,
+    bundleIdentifier: bundleIdentifier === 'missing value' ? '' : bundleIdentifier,
+    pid: Number.isInteger(pid) ? pid : null,
+  };
 }
 
-async function activateMacApp(appName) {
-  if (!appName) {
-    return;
-  }
-
-  await runAppleScript(`
-    tell application ${appleScriptQuoted(appName)}
-      activate
-    end tell
+async function getFrontmostMacApp() {
+  const rawIdentity = await runAppleScript(`
+    use framework "AppKit"
+    set frontApp to current application's NSWorkspace's sharedWorkspace()'s frontmostApplication()
+    set processName to frontApp's localizedName() as text
+    set processBundleIdentifier to frontApp's bundleIdentifier() as text
+    set processId to frontApp's processIdentifier() as integer
+    return processName & linefeed & processBundleIdentifier & linefeed & (processId as text)
   `);
+
+  return parseMacAppIdentity(rawIdentity);
 }
 
-async function readSelectedTextViaMacAccessibility(appName) {
-  if (!appName) {
+function macAppProcessLookupScript(macApp) {
+  if (!macApp?.pid && !macApp?.bundleIdentifier && !macApp?.name) {
     return '';
   }
 
-  return runAppleScript(`
-    tell application "System Events"
-      tell application process ${appleScriptQuoted(appName)}
+  return `
+    set targetProcess to missing value
+    repeat with candidateProcess in application processes
+      try
+        if ${macApp?.pid ? `(unix id of candidateProcess as integer) is ${macApp.pid}` : 'false'} then
+          set targetProcess to candidateProcess
+          exit repeat
+        end if
+      end try
+    end repeat
+    if targetProcess is missing value then
+      repeat with candidateProcess in application processes
         try
-          set focusedElement to value of attribute "AXFocusedUIElement"
-          set selectedText to value of attribute "AXSelectedText" of focusedElement
-
-          if selectedText is missing value then
-            return ""
+          if ${macApp?.bundleIdentifier ? `(bundle identifier of candidateProcess as string) is ${appleScriptQuoted(macApp.bundleIdentifier)}` : 'false'} then
+            set targetProcess to candidateProcess
+            exit repeat
           end if
-
-          return selectedText
-        on error
-          return ""
         end try
-      end tell
-    end tell
-  `);
+      end repeat
+    end if
+    if targetProcess is missing value then
+      repeat with candidateProcess in application processes
+        try
+          if ${macApp?.name ? `(name of candidateProcess as string) is ${appleScriptQuoted(macApp.name)}` : 'false'} then
+            set targetProcess to candidateProcess
+            exit repeat
+          end if
+        end try
+      end repeat
+    end if
+  `;
 }
 
-async function readSelectedRangeViaMacAccessibility(appName) {
-  if (!appName) {
-    return null;
-  }
-
-  const rawRange = await runAppleScript(`
-    tell application "System Events"
-      tell application process ${appleScriptQuoted(appName)}
-        try
-          set focusedElement to value of attribute "AXFocusedUIElement"
-          set selectedRange to value of attribute "AXSelectedTextRange" of focusedElement
-
-          if selectedRange is missing value then
-            return ""
-          end if
-
-          return (item 1 of selectedRange as string) & "," & (item 2 of selectedRange as string)
-        on error
-          return ""
-        end try
-      end tell
-    end tell
-  `);
-
-  if (!rawRange) {
-    return null;
-  }
-
-  const [startText, lengthText] = rawRange.split(',');
-  const start = Number.parseInt(startText ?? '', 10);
-  const length = Number.parseInt(lengthText ?? '', 10);
-
-  if (!Number.isInteger(start) || !Number.isInteger(length) || start < 0 || length < 0) {
-    return null;
-  }
-
-  return { start, length };
-}
-
-async function readSelectedTextFromMacClipboard(clipboardBackup, appName) {
+async function readSelectedTextFromMacClipboard(clipboardBackup) {
   const clipboardSentinel = `__LINGUAFIX_SELECTION__${Date.now()}__`;
 
   clipboard.writeText(clipboardSentinel);
-  await activateMacApp(appName);
-  await sleep(AUTOMATION_SHORTCUT_SETTLE_DELAY_MS);
   await triggerMacSelectionShortcut('c');
 
   let selectedText = '';
@@ -342,92 +318,35 @@ async function readSelectedTextFromMacClipboard(clipboardBackup, appName) {
 
 async function readSelectedTextFromMacApp() {
   const clipboardBackup = clipboard.readText();
-  const frontmostAppName = await getFrontmostMacAppName();
-  const accessibilitySelectedText = await readSelectedTextViaMacAccessibility(frontmostAppName);
-  const accessibilitySelectedRange = await readSelectedRangeViaMacAccessibility(frontmostAppName);
+  const frontmostApp = await getFrontmostMacApp();
+  const clipboardSelectionState = await readSelectedTextFromMacClipboard(clipboardBackup);
 
-  if (accessibilitySelectedText.trim()) {
-    return {
-      clipboardBackup,
-      frontmostAppName,
-      selectedText: accessibilitySelectedText,
-      selectedRange: accessibilitySelectedRange,
-    };
-  }
-
-  const clipboardSelectionState = await readSelectedTextFromMacClipboard(
-    clipboardBackup,
-    frontmostAppName,
-  );
   return {
     ...clipboardSelectionState,
-    frontmostAppName,
-    selectedRange: accessibilitySelectedRange,
+    frontmostApp,
   };
 }
 
-async function replaceSelectionViaMacAccessibility(text, appName, selectedRange) {
-  if (!appName || !selectedRange || selectedRange.length <= 0) {
-    return false;
-  }
-
-  const rawResult = await runAppleScript(`
-    tell application "System Events"
-      tell application process ${appleScriptQuoted(appName)}
-        try
-          set focusedElement to value of attribute "AXFocusedUIElement"
-          set currentValue to value of attribute "AXValue" of focusedElement
-
-          if currentValue is missing value then
-            return "false"
-          end if
-
-          set rangeStart to ${selectedRange.start}
-          set rangeLength to ${selectedRange.length}
-          set replacementText to ${appleScriptQuoted(text)}
-          set currentLength to length of currentValue
-          set prefixText to ""
-          set suffixText to ""
-
-          if rangeStart > 0 then
-            set prefixText to text 1 thru rangeStart of currentValue
-          end if
-
-          if (rangeStart + rangeLength) < currentLength then
-            set suffixText to text (rangeStart + rangeLength + 1) thru -1 of currentValue
-          end if
-
-          set value of attribute "AXValue" of focusedElement to (prefixText & replacementText & suffixText)
-
-          try
-            set value of attribute "AXSelectedTextRange" of focusedElement to {(rangeStart + (length of replacementText)), 0}
-          end try
-
-          return "true"
-        on error
-          return "false"
-        end try
-      end tell
-    end tell
-  `);
-
-  return rawResult === 'true';
-}
-
-async function replaceSelectionInMacApp(text, clipboardBackup, frontmostAppName, selectedRange) {
-  const replacedViaAccessibility = await replaceSelectionViaMacAccessibility(
-    text,
-    frontmostAppName,
-    selectedRange,
-  );
-
-  if (replacedViaAccessibility) {
-    return;
-  }
-
+async function replaceSelectionInMacApp(text, clipboardBackup, frontmostApp) {
   clipboard.writeText(text);
-  await sleep(AUTOMATION_SHORTCUT_SETTLE_DELAY_MS);
-  await triggerMacSelectionShortcut('v');
+  const processLookup = macAppProcessLookupScript(frontmostApp);
+
+  if (processLookup) {
+    await runAppleScript(`
+      tell application "System Events"
+        try
+          ${processLookup}
+          if targetProcess is not missing value then
+            set frontmost of targetProcess to true
+          end if
+        end try
+        keystroke "v" using command down
+      end tell
+    `);
+  } else {
+    await triggerMacSelectionShortcut('v');
+  }
+
   await sleep(AUTOMATION_PASTE_RESTORE_DELAY_MS);
   clipboard.writeText(clipboardBackup);
 }
@@ -448,7 +367,7 @@ async function tryProcessSelectedTextInPlace() {
   try {
     const selectionState = await readSelectedTextFromMacApp();
     clipboardBackup = selectionState.clipboardBackup;
-    const { frontmostAppName, selectedRange, selectedText } = selectionState;
+    const { frontmostApp, selectedText } = selectionState;
 
     if (!selectedText.trim()) {
       clipboard.writeText(clipboardBackup);
@@ -467,8 +386,7 @@ async function tryProcessSelectedTextInPlace() {
     await replaceSelectionInMacApp(
       response.output,
       clipboardBackup,
-      frontmostAppName,
-      selectedRange,
+      frontmostApp,
     );
     return true;
   } catch (error) {
@@ -573,7 +491,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 720,
     title: 'LinguaFix',
-    backgroundColor: '#efe7d5',
+    backgroundColor: WINDOW_BACKGROUND_COLOR,
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -630,7 +548,7 @@ function createPopupWindow() {
     minHeight: 460,
     show: false,
     title: 'Quick Translate',
-    backgroundColor: '#efe7d5',
+    backgroundColor: WINDOW_BACKGROUND_COLOR,
     ...(process.platform === 'darwin'
       ? {
           titleBarStyle: 'hiddenInset',
