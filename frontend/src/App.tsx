@@ -732,9 +732,17 @@ function App() {
                 </div>
               </label>
 
-              {(config.provider === 'gemini_vertex' || config.provider === 'custom_open_ai') && (
+              {(config.provider === 'gemini_vertex' ||
+                config.provider === 'aws_bedrock' ||
+                config.provider === 'custom_open_ai') && (
                 <label className="settings-row">
-                  <span>{config.provider === 'gemini_vertex' ? 'Vertex endpoint' : 'Base URL'}</span>
+                  <span>
+                    {config.provider === 'gemini_vertex'
+                      ? 'Vertex endpoint'
+                      : config.provider === 'aws_bedrock'
+                        ? 'AWS region or endpoint'
+                        : 'Base URL'}
+                  </span>
                   <div className="settings-control">
                     <input
                       type="text"

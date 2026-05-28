@@ -2,7 +2,13 @@ export type TaskKind = 'auto_process'
 
 export type PopupMode = 'manual' | 'selection_translation'
 
-export type Provider = 'open_ai' | 'gemini_ai_studio' | 'gemini_vertex' | 'custom_open_ai'
+export type Provider =
+  | 'open_ai'
+  | 'gemini_ai_studio'
+  | 'gemini_vertex'
+  | 'deep_seek'
+  | 'aws_bedrock'
+  | 'custom_open_ai'
 
 export type AppConfig = {
   provider: Provider

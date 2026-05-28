@@ -9,12 +9,36 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use hmac::{Hmac, Mac};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
+use time::format_description::FormatItem;
+use time::macros::format_description;
 
 const APP_NAME: &str = "LinguaFix";
 const DEFAULT_PORT: u16 = 8787;
+const BEDROCK_SERVICE: &str = "bedrock";
+const BEDROCK_SIGNING_TERMINATOR: &str = "aws4_request";
+const BEDROCK_MODEL_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b':');
+const AMZ_DATE_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year][month][day]T[hour][minute][second]Z");
+const AWS_DATE_FORMAT: &[FormatItem<'static>] = format_description!("[year][month][day]");
 const DEFAULT_TRANSLATION_PROMPT: &str = r#"You are a bilingual Chinese-English writing assistant. Your only task is to transform the user's text without answering it or adding commentary.
 
 Determine the primary language of the input:
@@ -112,7 +136,7 @@ async fn process_text(
         return Err(ApiError::bad_request("Input text is empty."));
     }
 
-    if api_key.trim().is_empty() {
+    if api_key.trim().is_empty() && !matches!(provider, Provider::AwsBedrock) {
         return Err(ApiError::bad_request(
             "API key is missing. Save it in settings first.",
         ));
@@ -145,6 +169,20 @@ async fn process_text(
         }
         Provider::GeminiVertex => {
             run_vertex_request(api_key, model, base_url, &system_prompt, &text).await
+        }
+        Provider::DeepSeek => {
+            DeepSeekClient { api_key, model }
+                .run(&system_prompt, &text)
+                .await
+        }
+        Provider::AwsBedrock => {
+            BedrockClient {
+                credentials: BedrockCredentials::load(&api_key).map_err(ApiError::bad_request)?,
+                model,
+                endpoint: base_url,
+            }
+            .run(&system_prompt, &text)
+            .await
         }
         Provider::CustomOpenAi => {
             ChatCompletionsClient {
@@ -405,6 +443,8 @@ enum Provider {
     OpenAi,
     GeminiAiStudio,
     GeminiVertex,
+    DeepSeek,
+    AwsBedrock,
     CustomOpenAi,
 }
 
@@ -413,7 +453,20 @@ impl Provider {
         match self {
             Self::OpenAi => "gpt-4.1-mini",
             Self::GeminiAiStudio | Self::GeminiVertex => "gemini-3.5-flash",
+            Self::DeepSeek => "deepseek-chat",
+            Self::AwsBedrock => "anthropic.claude-3-5-haiku-20241022-v1:0",
             Self::CustomOpenAi => "",
+        }
+    }
+
+    fn env_api_key(&self) -> String {
+        match self {
+            Self::OpenAi | Self::CustomOpenAi => env::var("OPENAI_API_KEY").unwrap_or_default(),
+            Self::GeminiAiStudio | Self::GeminiVertex => env::var("GEMINI_API_KEY")
+                .or_else(|_| env::var("GOOGLE_API_KEY"))
+                .unwrap_or_default(),
+            Self::DeepSeek => env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
+            Self::AwsBedrock => String::new(),
         }
     }
 }
@@ -436,7 +489,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             provider: Provider::default(),
-            api_key: env::var("OPENAI_API_KEY").unwrap_or_default(),
+            api_key: Provider::default().env_api_key(),
             model: Provider::default().default_model().to_owned(),
             base_url: String::new(),
             translation_prompt: default_translation_prompt(),
@@ -455,7 +508,7 @@ impl AppConfig {
         let mut config = serde_json::from_str::<AppConfig>(&contents).unwrap_or_default();
 
         if config.api_key.trim().is_empty() {
-            config.api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
+            config.api_key = config.provider.env_api_key();
         }
 
         if config.model.trim().is_empty() {
@@ -607,7 +660,7 @@ impl TranslationLogStore {
                 FROM translations tr
                 {}
                 ORDER BY {}
-                LIMIT ?1 OFFSET ?2",
+                LIMIT ? OFFSET ?",
                 filters.where_clause, order_clause
             ))
             .map_err(|error| format!("Could not prepare translation history query: {error}"))?;
@@ -1600,6 +1653,307 @@ struct GeminiCandidateContent {
     parts: Vec<GeminiPart>,
 }
 
+// --- DeepSeek Chat Completions ---
+
+struct DeepSeekClient {
+    api_key: String,
+    model: String,
+}
+
+impl DeepSeekClient {
+    async fn run(&self, system_prompt: &str, input: &str) -> Result<String, String> {
+        ChatCompletionsClient {
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            base_url: "https://api.deepseek.com".to_owned(),
+        }
+        .run_with_path("/chat/completions", system_prompt, input)
+        .await
+    }
+}
+
+// --- Amazon Bedrock Runtime InvokeModel (Anthropic Claude Messages) ---
+
+struct BedrockCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+impl BedrockCredentials {
+    fn load(value: &str) -> Result<Self, String> {
+        let trimmed = value.trim();
+
+        if !trimmed.is_empty() {
+            let parts = trimmed.splitn(3, ':').collect::<Vec<_>>();
+            if parts.len() >= 2 {
+                return Ok(Self {
+                    access_key_id: parts[0].trim().to_owned(),
+                    secret_access_key: parts[1].trim().to_owned(),
+                    session_token: parts
+                        .get(2)
+                        .and_then(|value| non_empty((*value).to_owned())),
+                });
+            }
+        }
+
+        let access_key_id = non_empty(
+            if trimmed.is_empty() {
+                env::var("AWS_ACCESS_KEY_ID").unwrap_or_default()
+            } else {
+                trimmed.to_owned()
+            },
+        )
+        .ok_or_else(|| {
+            "AWS credentials are missing. Save access_key_id:secret_access_key in settings, or set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.".to_owned()
+        })?;
+        let secret_access_key = env::var("AWS_SECRET_ACCESS_KEY")
+            .ok()
+            .and_then(non_empty)
+            .ok_or_else(|| {
+                "AWS_SECRET_ACCESS_KEY is missing. Save access_key_id:secret_access_key in settings, or set AWS_SECRET_ACCESS_KEY.".to_owned()
+            })?;
+        let session_token = env::var("AWS_SESSION_TOKEN").ok().and_then(non_empty);
+
+        Ok(Self {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        })
+    }
+}
+
+struct BedrockClient {
+    credentials: BedrockCredentials,
+    model: String,
+    endpoint: String,
+}
+
+impl BedrockClient {
+    async fn run(&self, system_prompt: &str, input: &str) -> Result<String, String> {
+        let region = resolve_bedrock_region(&self.endpoint)?;
+        let base_url = resolve_bedrock_base_url(&self.endpoint, &region);
+        let encoded_model = utf8_percent_encode(&self.model, BEDROCK_MODEL_ENCODE_SET).to_string();
+        let path = format!("/model/{encoded_model}/invoke");
+        let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+        let body = BedrockClaudeRequest {
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 4096,
+            system: system_prompt,
+            messages: vec![BedrockClaudeMessage {
+                role: "user",
+                content: vec![BedrockClaudeContent {
+                    content_type: "text",
+                    text: input,
+                }],
+            }],
+        };
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|error| format!("Could not encode Bedrock request: {error}"))?;
+        let host = reqwest::Url::parse(&url)
+            .map_err(|error| format!("Invalid Bedrock endpoint: {error}"))?
+            .host_str()
+            .ok_or_else(|| "Bedrock endpoint is missing a host.".to_owned())?
+            .to_owned();
+        let signed = sign_bedrock_request(&self.credentials, &region, &host, &path, &body_bytes)?;
+
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+        let mut request = client
+            .post(&url)
+            .header("authorization", signed.authorization)
+            .header("content-type", "application/json")
+            .header("host", host)
+            .header("x-amz-content-sha256", signed.payload_hash)
+            .header("x-amz-date", signed.amz_date)
+            .body(body_bytes);
+
+        if let Some(session_token) = &self.credentials.session_token {
+            request = request.header("x-amz-security-token", session_token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("Request failed: {error}"))?;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "The API returned an unreadable error body.".to_owned());
+            return Err(format!("Bedrock API error ({status}): {body}"));
+        }
+
+        let payload: BedrockClaudeResponse = response
+            .json()
+            .await
+            .map_err(|error| format!("Could not decode Bedrock response: {error}"))?;
+
+        payload
+            .content
+            .into_iter()
+            .find_map(|content| content.text)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| "The model response did not contain text output.".to_owned())
+    }
+}
+
+#[derive(Serialize)]
+struct BedrockClaudeRequest<'a> {
+    anthropic_version: &'static str,
+    max_tokens: u16,
+    system: &'a str,
+    messages: Vec<BedrockClaudeMessage<'a>>,
+}
+
+#[derive(Serialize)]
+struct BedrockClaudeMessage<'a> {
+    role: &'static str,
+    content: Vec<BedrockClaudeContent<'a>>,
+}
+
+#[derive(Serialize)]
+struct BedrockClaudeContent<'a> {
+    #[serde(rename = "type")]
+    content_type: &'static str,
+    text: &'a str,
+}
+
+#[derive(Deserialize)]
+struct BedrockClaudeResponse {
+    #[serde(default)]
+    content: Vec<BedrockClaudeResponseContent>,
+}
+
+#[derive(Deserialize)]
+struct BedrockClaudeResponseContent {
+    text: Option<String>,
+}
+
+struct SignedBedrockRequest {
+    authorization: String,
+    amz_date: String,
+    payload_hash: String,
+}
+
+fn sign_bedrock_request(
+    credentials: &BedrockCredentials,
+    region: &str,
+    host: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<SignedBedrockRequest, String> {
+    let now = OffsetDateTime::now_utc();
+    let amz_date = now
+        .format(AMZ_DATE_FORMAT)
+        .map_err(|error| format!("Could not format AWS timestamp: {error}"))?;
+    let aws_date = now
+        .format(AWS_DATE_FORMAT)
+        .map_err(|error| format!("Could not format AWS date: {error}"))?;
+    let payload_hash = sha256_hex(body);
+    let mut canonical_headers = format!(
+        "content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+    );
+    let mut signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date".to_owned();
+
+    if let Some(session_token) = &credentials.session_token {
+        canonical_headers.push_str(&format!("x-amz-security-token:{session_token}\n"));
+        signed_headers.push_str(";x-amz-security-token");
+    }
+
+    let canonical_request =
+        format!("POST\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let credential_scope =
+        format!("{aws_date}/{region}/{BEDROCK_SERVICE}/{BEDROCK_SIGNING_TERMINATOR}");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let signing_key = bedrock_signing_key(
+        &credentials.secret_access_key,
+        &aws_date,
+        region,
+        BEDROCK_SERVICE,
+    )?;
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        credentials.access_key_id
+    );
+
+    Ok(SignedBedrockRequest {
+        authorization,
+        amz_date,
+        payload_hash,
+    })
+}
+
+fn resolve_bedrock_region(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+
+    if !trimmed.is_empty() && !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Ok(trimmed.to_owned());
+    }
+
+    let region = env::var("AWS_REGION")
+        .ok()
+        .or_else(|| env::var("AWS_DEFAULT_REGION").ok())
+        .and_then(non_empty)
+        .or_else(|| infer_region_from_bedrock_endpoint(trimmed))
+        .unwrap_or_else(|| "us-east-1".to_owned());
+
+    Ok(region)
+}
+
+fn resolve_bedrock_base_url(value: &str, region: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_owned()
+    } else {
+        format!("https://bedrock-runtime.{region}.amazonaws.com")
+    }
+}
+
+fn infer_region_from_bedrock_endpoint(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    let host = url.host_str()?;
+    let suffix = ".amazonaws.com";
+    let without_suffix = host.strip_suffix(suffix)?;
+    let region = without_suffix.strip_prefix("bedrock-runtime.")?;
+    non_empty(region.to_owned())
+}
+
+fn bedrock_signing_key(
+    secret_access_key: &str,
+    date: &str,
+    region: &str,
+    service: &str,
+) -> Result<Vec<u8>, String> {
+    let date_key = hmac_sha256(
+        format!("AWS4{secret_access_key}").as_bytes(),
+        date.as_bytes(),
+    )?;
+    let region_key = hmac_sha256(&date_key, region.as_bytes())?;
+    let service_key = hmac_sha256(&region_key, service.as_bytes())?;
+    hmac_sha256(&service_key, BEDROCK_SIGNING_TERMINATOR.as_bytes())
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|error| format!("Could not initialize HMAC: {error}"))?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
 // --- Custom OpenAI-style Chat Completions ---
 
 struct ChatCompletionsClient {
@@ -1610,6 +1964,16 @@ struct ChatCompletionsClient {
 
 impl ChatCompletionsClient {
     async fn run(&self, system_prompt: &str, input: &str) -> Result<String, String> {
+        self.run_with_path("/v1/chat/completions", system_prompt, input)
+            .await
+    }
+
+    async fn run_with_path(
+        &self,
+        path: &str,
+        system_prompt: &str,
+        input: &str,
+    ) -> Result<String, String> {
         let body = ChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -1624,10 +1988,7 @@ impl ChatCompletionsClient {
             ],
         };
 
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
 
         let client = reqwest::Client::builder()
             .build()

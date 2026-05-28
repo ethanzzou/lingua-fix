@@ -15,6 +15,8 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   open_ai: 'OpenAI',
   gemini_ai_studio: 'Gemini AI Studio',
   gemini_vertex: 'Gemini Vertex AI',
+  deep_seek: 'DeepSeek',
+  aws_bedrock: 'AWS Bedrock',
   custom_open_ai: 'Custom (OpenAI-compatible)',
 }
 
@@ -22,6 +24,8 @@ export const PROVIDER_KEY_LABELS: Record<Provider, string> = {
   open_ai: 'OpenAI API key',
   gemini_ai_studio: 'Google AI Studio API key',
   gemini_vertex: 'Google Cloud API key or OAuth access token',
+  deep_seek: 'DeepSeek API key',
+  aws_bedrock: 'AWS credentials',
   custom_open_ai: 'API key',
 }
 
@@ -29,18 +33,24 @@ export const PROVIDER_KEY_PLACEHOLDERS: Record<Provider, string> = {
   open_ai: 'sk-...',
   gemini_ai_studio: 'AIza...',
   gemini_vertex: 'AIza... or gcloud auth print-access-token',
+  deep_seek: 'sk-...',
+  aws_bedrock: 'access_key_id:secret_access_key[:session_token]',
   custom_open_ai: 'API key',
 }
 
 export const PROVIDER_KEY_HINTS: Partial<Record<Provider, string>> = {
   gemini_vertex:
     'Vertex accepts a Google Cloud API key or an OAuth token. AI Studio API keys do not work here.',
+  aws_bedrock:
+    'Optional when AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set in the environment.',
 }
 
 export const PROVIDER_MODEL_PLACEHOLDERS: Record<Provider, string> = {
   open_ai: 'gpt-4.1-mini',
   gemini_ai_studio: 'gemini-3.5-flash',
   gemini_vertex: 'gemini-3.5-flash',
+  deep_seek: 'deepseek-chat',
+  aws_bedrock: 'anthropic.claude-3-5-haiku-20241022-v1:0',
   custom_open_ai: 'model name',
 }
 
@@ -49,12 +59,16 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS: Record<Provider, string> = {
   gemini_ai_studio: '',
   gemini_vertex:
     'https://aiplatform.googleapis.com/v1/projects/MY_PROJECT/locations/global',
+  deep_seek: '',
+  aws_bedrock: 'us-east-1',
   custom_open_ai: 'https://api.together.xyz',
 }
 
 export const PROVIDER_BASE_URL_HINTS: Partial<Record<Provider, string>> = {
   gemini_vertex:
     'Optional. Leave this blank to use your active gcloud project, or the global express-mode endpoint when using only a Vertex API key.',
+  aws_bedrock:
+    'Optional. Enter an AWS region such as us-east-1, or a full Bedrock Runtime endpoint URL.',
   custom_open_ai:
     'Required for deployed Model Garden OpenAI-compatible endpoints and other OpenAI-style APIs.',
 }

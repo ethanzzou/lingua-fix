@@ -34,6 +34,8 @@ The in-place macOS workflow copies the selected text, sends it through LinguaFix
 - OpenAI
 - Gemini AI Studio
 - Gemini Vertex AI
+- DeepSeek
+- AWS Bedrock
 - Custom OpenAI-compatible APIs
 
 ## Tech Stack
@@ -114,6 +116,12 @@ The configurable fields include:
 - base URL
 - translation prompt
 - data directory
+
+Provider notes:
+
+- DeepSeek uses the OpenAI-compatible chat completions API at `https://api.deepseek.com`.
+- AWS Bedrock uses the Runtime `InvokeModel` API with Anthropic Claude Messages models. The key field accepts `access_key_id:secret_access_key[:session_token]`, or you can leave it empty and set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
+- For Bedrock, the base URL field is used as an AWS region such as `us-east-1`, or as a full Bedrock Runtime endpoint URL. If left blank, LinguaFix uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
 
 By default, the app also stores translation history locally in:
 
