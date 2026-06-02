@@ -23,6 +23,10 @@ const SELECTION_ICON_SIZE = 28;
 const SELECTION_ICON_TIMEOUT_MS = 4000;
 const SELECTION_CONFIG_POLL_INTERVAL_MS = 4000;
 const SELECTION_ACCESSIBILITY_NOTICE_INTERVAL_MS = 60000;
+const SELECTION_CARD_WIDTH = 460;
+const SELECTION_CARD_MIN_HEIGHT = 48;
+const SELECTION_CARD_MAX_HEIGHT = 480;
+const SELECTION_DISMISS_GRACE_MS = 220;
 
 let mainWindow = null;
 let popupWindow = null;
@@ -35,15 +39,25 @@ let isRunningSelectionWorkflow = false;
 let statusBarItem = null;
 let selectionIconWindow = null;
 let uIOhook = null;
+let UiohookKey = null;
 let selectionWatcherRunning = false;
 let selectionPopupEnabled = false;
 let selectionConfigPollTimer = null;
 let selectionMouseDownPoint = null;
+let clipboardAtMouseDown = '';
 let selectionCaptureTimer = null;
 let isCapturingSelection = false;
 let pendingSelectionText = '';
 let selectionIconDismissTimer = null;
 let selectionAccessibilityNoticeAt = 0;
+let selectionCardWindow = null;
+let selectionCardReady = false;
+let pendingCardPayload = null;
+let cardSourceText = '';
+let cardAnchor = null;
+let marked = null;
+const selectionHoverState = { icon: false, card: false };
+let selectionDismissGraceTimer = null;
 
 function isDev() {
   return !app.isPackaged;
@@ -768,8 +782,17 @@ function selectionIconHtml() {
   <body>
     <div id="icon" title="Translate selection">译</div>
     <script>
-      document.getElementById('icon').addEventListener('click', () => {
+      const icon = document.getElementById('icon');
+      icon.addEventListener('click', () => {
         window.linguafix && window.linguafix.notifySelectionIconClicked();
+      });
+      icon.addEventListener('mouseenter', () => {
+        if (!window.linguafix) return;
+        window.linguafix.notifySelectionHoverIn('icon');
+        window.linguafix.notifySelectionIconHovered();
+      });
+      icon.addEventListener('mouseleave', () => {
+        window.linguafix && window.linguafix.notifySelectionHoverOut('icon');
       });
     </script>
   </body>
@@ -834,6 +857,352 @@ function isPointInsideSelectionIcon(point) {
     point.y >= bounds.y &&
     point.y <= bounds.y + bounds.height
   );
+}
+
+function isPointInsideSelectionCard(point) {
+  if (!selectionCardWindow || selectionCardWindow.isDestroyed() || !selectionCardWindow.isVisible()) {
+    return false;
+  }
+
+  const bounds = selectionCardWindow.getBounds();
+  return (
+    point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
+  );
+}
+
+function loadMarked() {
+  if (marked) {
+    return marked;
+  }
+
+  try {
+    ({ marked } = require('marked'));
+  } catch (error) {
+    console.log(`[LinguaFix] Markdown renderer unavailable: ${error.message}`);
+    marked = null;
+  }
+
+  return marked;
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Strip script-ish tags and inline event handlers before the HTML reaches the
+// card's innerHTML. The card window is sandboxed (contextIsolation, no node, no
+// remote content); this closes the <img onerror=...> style vector from model output.
+function scrubHtml(html) {
+  return String(html)
+    .replace(/<\/?(?:script|style|iframe|object|embed|link|meta|base)\b[^>]*>/gi, '')
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, '')
+    .replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*/gi, '$1=$2#');
+}
+
+function renderSelectionMarkdown(text) {
+  const renderer = loadMarked();
+  if (!renderer) {
+    return `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+  }
+
+  try {
+    return scrubHtml(renderer.parse(String(text), { gfm: true, breaks: true }));
+  } catch (_) {
+    return `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+  }
+}
+
+function selectionCardHtml() {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+      #card {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 16px 18px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 14.5px;
+        line-height: 1.62;
+        color: #1c1c1e;
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 12px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #content {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      #content.loading { color: #8a8a8e; }
+      #content :first-child { margin-top: 0; }
+      #content :last-child { margin-bottom: 0; }
+      #content p { margin: 0 0 10px; }
+      #content ul, #content ol { margin: 0 0 10px; padding-left: 22px; }
+      #content li { margin: 3px 0; }
+      #content code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+        background: rgba(0, 0, 0, 0.06);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      #content pre {
+        background: rgba(0, 0, 0, 0.06);
+        padding: 10px 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 0 0 10px;
+      }
+      #content pre code { background: none; padding: 0; }
+      #content h1, #content h2, #content h3 { font-size: 15.5px; font-weight: 650; margin: 12px 0 8px; }
+      #content blockquote {
+        margin: 0 0 10px;
+        padding-left: 12px;
+        border-left: 3px solid rgba(0, 0, 0, 0.12);
+        color: #5b5b5f;
+      }
+      #content a { color: #2f6df6; }
+      #content table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 0 0 10px;
+        font-size: 13.5px;
+      }
+      #content th, #content td {
+        border: 1px solid rgba(0, 0, 0, 0.14);
+        padding: 5px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      #content th { background: rgba(0, 0, 0, 0.05); font-weight: 650; }
+      #content hr { border: none; border-top: 1px solid rgba(0, 0, 0, 0.1); margin: 12px 0; }
+      #card::-webkit-scrollbar { width: 8px; }
+      #card::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="card"><div id="content" class="loading">翻译中…</div></div>
+    <script>
+      const card = document.getElementById('card');
+      const content = document.getElementById('content');
+
+      function reportSize() {
+        if (window.linguafix && window.linguafix.reportSelectionCardSize) {
+          window.linguafix.reportSelectionCardSize(Math.ceil(card.scrollHeight));
+        }
+      }
+
+      card.addEventListener('mouseenter', () => {
+        window.linguafix && window.linguafix.notifySelectionHoverIn('card');
+      });
+      card.addEventListener('mouseleave', () => {
+        window.linguafix && window.linguafix.notifySelectionHoverOut('card');
+      });
+
+      if (window.linguafix && window.linguafix.onSelectionCardContent) {
+        window.linguafix.onSelectionCardContent((payload) => {
+          if (payload && payload.loading) {
+            content.className = 'loading';
+            content.textContent = (payload && payload.text) || '翻译中…';
+          } else {
+            content.className = '';
+            content.innerHTML = (payload && payload.html) || '';
+          }
+          requestAnimationFrame(reportSize);
+        });
+      }
+
+      requestAnimationFrame(reportSize);
+    </script>
+  </body>
+</html>`;
+}
+
+function createSelectionCardWindow() {
+  if (selectionCardWindow && !selectionCardWindow.isDestroyed()) {
+    return selectionCardWindow;
+  }
+
+  selectionCardReady = false;
+  selectionCardWindow = new BrowserWindow({
+    width: SELECTION_CARD_WIDTH,
+    height: SELECTION_CARD_MIN_HEIGHT,
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    backgroundColor: '#00000000',
+    ...(process.platform === 'darwin' ? { type: 'panel' } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  if (process.platform === 'darwin') {
+    selectionCardWindow.setHiddenInMissionControl(true);
+    selectionCardWindow.setAlwaysOnTop(true, 'floating');
+    selectionCardWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } else {
+    selectionCardWindow.setAlwaysOnTop(true);
+  }
+
+  selectionCardWindow.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(selectionCardHtml())}`,
+  );
+
+  selectionCardWindow.webContents.on('did-finish-load', () => {
+    selectionCardReady = true;
+    if (pendingCardPayload) {
+      selectionCardWindow.webContents.send('linguafix:selection-card-content', pendingCardPayload);
+      pendingCardPayload = null;
+    }
+  });
+
+  selectionCardWindow.on('closed', () => {
+    selectionCardWindow = null;
+    selectionCardReady = false;
+    pendingCardPayload = null;
+  });
+
+  return selectionCardWindow;
+}
+
+function applyCardBounds(height) {
+  if (!selectionCardWindow || selectionCardWindow.isDestroyed() || !cardAnchor) {
+    return;
+  }
+
+  const display = screen.getDisplayNearestPoint({ x: cardAnchor.x, y: cardAnchor.y });
+  const workArea = display.workArea;
+  const h = Math.max(
+    SELECTION_CARD_MIN_HEIGHT,
+    Math.min(height || SELECTION_CARD_MIN_HEIGHT, SELECTION_CARD_MAX_HEIGHT),
+  );
+
+  let x = Math.min(cardAnchor.x, workArea.x + workArea.width - SELECTION_CARD_WIDTH);
+  x = Math.max(x, workArea.x);
+
+  let y = cardAnchor.y;
+  if (y + h > workArea.y + workArea.height) {
+    // Flip above the original cursor when there is no room below.
+    y = cardAnchor.cy - 8 - h;
+  }
+  y = Math.max(y, workArea.y);
+
+  selectionCardWindow.setBounds({
+    x: Math.round(x),
+    y: Math.round(y),
+    width: SELECTION_CARD_WIDTH,
+    height: Math.round(h),
+  });
+}
+
+function sendSelectionCard(payload) {
+  if (!selectionCardWindow || selectionCardWindow.isDestroyed()) {
+    return;
+  }
+
+  if (!selectionCardReady) {
+    pendingCardPayload = payload;
+    return;
+  }
+
+  selectionCardWindow.webContents.send('linguafix:selection-card-content', payload);
+}
+
+function setSelectionCardLoading() {
+  sendSelectionCard({ loading: true, text: '翻译中…' });
+}
+
+function setSelectionCardContent(html) {
+  sendSelectionCard({ html });
+}
+
+function showSelectionCard() {
+  const cursor = screen.getCursorScreenPoint();
+  cardAnchor = { x: cursor.x + 12, y: cursor.y + 16 + SELECTION_ICON_SIZE, cy: cursor.y };
+
+  const window = createSelectionCardWindow();
+  applyCardBounds(SELECTION_CARD_MIN_HEIGHT);
+  window.showInactive();
+  window.moveTop();
+}
+
+function hideSelectionCard() {
+  cardSourceText = '';
+  selectionHoverState.card = false;
+
+  if (selectionCardWindow && !selectionCardWindow.isDestroyed() && selectionCardWindow.isVisible()) {
+    selectionCardWindow.hide();
+  }
+}
+
+function scheduleSelectionDismiss() {
+  if (selectionDismissGraceTimer) {
+    clearTimeout(selectionDismissGraceTimer);
+  }
+
+  selectionDismissGraceTimer = setTimeout(() => {
+    selectionDismissGraceTimer = null;
+    if (!selectionHoverState.icon && !selectionHoverState.card) {
+      hideSelectionCard();
+      hideSelectionIcon();
+    }
+  }, SELECTION_DISMISS_GRACE_MS);
+}
+
+function handleSelectionHoverIn(target) {
+  if (target === 'icon') {
+    selectionHoverState.icon = true;
+  } else if (target === 'card') {
+    selectionHoverState.card = true;
+  }
+
+  if (selectionDismissGraceTimer) {
+    clearTimeout(selectionDismissGraceTimer);
+    selectionDismissGraceTimer = null;
+  }
+}
+
+function handleSelectionHoverOut(target) {
+  if (target === 'icon') {
+    selectionHoverState.icon = false;
+  } else if (target === 'card') {
+    selectionHoverState.card = false;
+  }
+
+  scheduleSelectionDismiss();
 }
 
 function showSelectionIcon(text) {
@@ -917,6 +1286,17 @@ async function captureSelection() {
     let selectedText = await readSelectionViaAccessibility();
 
     if (!selectedText) {
+      // Terminals (Ghostty/iTerm/etc.) don't expose AXSelectedText, and tmux mouse mode
+      // intercepts the drag so there's no native selection for Cmd+C to copy. If the app
+      // copied-on-select (e.g. tmux `copy-pipe pbcopy`), the selection is already on the
+      // clipboard — pick it up if it changed during this drag, without simulating Cmd+C.
+      const current = clipboard.readText();
+      if (current && current !== clipboardAtMouseDown && current.trim().length >= SELECTION_MIN_TEXT_LENGTH) {
+        selectedText = current.trim();
+      }
+    }
+
+    if (!selectedText) {
       // Fall back to the Cmd+C reader; restore the clipboard afterwards.
       const selectionState = await readSelectedTextFromMacApp();
       selectedText = selectionState.selectedText.trim();
@@ -944,13 +1324,28 @@ async function captureSelection() {
 
 async function translatePendingSelection() {
   const text = pendingSelectionText;
-  hideSelectionIcon();
 
   if (!text || isRunningSelectionWorkflow) {
     return;
   }
 
+  // Already showing (or loading) the card for this exact selection — don't re-fire on
+  // repeated hover/click.
+  if (cardSourceText === text && selectionCardWindow && selectionCardWindow.isVisible()) {
+    return;
+  }
+
+  cardSourceText = text;
   isRunningSelectionWorkflow = true;
+
+  // Dismissal is now hover-driven; cancel the icon-only auto-hide so the card can't vanish.
+  if (selectionIconDismissTimer) {
+    clearTimeout(selectionIconDismissTimer);
+    selectionIconDismissTimer = null;
+  }
+
+  showSelectionCard();
+  setSelectionCardLoading();
 
   try {
     const response = await callService('/api/process', {
@@ -961,11 +1356,18 @@ async function translatePendingSelection() {
       }),
     });
 
-    showSelectedTextTranslationPopup(text, response.output);
+    if (cardSourceText !== text) {
+      return; // Superseded by a newer selection.
+    }
+
+    setSelectionCardContent(renderSelectionMarkdown(response.output));
   } catch (error) {
-    notify(
-      error instanceof Error ? error.message : 'Could not translate the selected text.',
-    );
+    if (cardSourceText !== text) {
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : 'Could not translate the selected text.';
+    setSelectionCardContent(renderSelectionMarkdown(message));
   } finally {
     isRunningSelectionWorkflow = false;
   }
@@ -974,9 +1376,22 @@ async function translatePendingSelection() {
 function handleSelectionMouseDown(event) {
   selectionMouseDownPoint = { x: event.x, y: event.y, button: event.button };
 
-  // A click anywhere outside the icon dismisses it (outside-click + new-selection).
-  if (selectionIconWindow && selectionIconWindow.isVisible()) {
-    if (!isPointInsideSelectionIcon(screen.getCursorScreenPoint())) {
+  // Snapshot the clipboard so we can detect a copy-on-select (e.g. tmux copy-pipe) that
+  // lands new text on the clipboard by the time the drag ends.
+  try {
+    clipboardAtMouseDown = clipboard.readText();
+  } catch (_) {
+    clipboardAtMouseDown = '';
+  }
+
+  // A click anywhere outside the icon and card dismisses both (outside-click + new-selection).
+  const iconVisible = selectionIconWindow && selectionIconWindow.isVisible();
+  const cardVisible = selectionCardWindow && selectionCardWindow.isVisible();
+
+  if (iconVisible || cardVisible) {
+    const point = screen.getCursorScreenPoint();
+    if (!isPointInsideSelectionIcon(point) && !isPointInsideSelectionCard(point)) {
+      hideSelectionCard();
       hideSelectionIcon();
     }
   }
@@ -1012,13 +1427,28 @@ function loadUiohook() {
   }
 
   try {
-    ({ uIOhook } = require('uiohook-napi'));
+    ({ uIOhook, UiohookKey } = require('uiohook-napi'));
   } catch (error) {
     console.log(`[LinguaFix] Mouse selection watcher unavailable: ${error.message}`);
     uIOhook = null;
+    UiohookKey = null;
   }
 
   return uIOhook;
+}
+
+function handleSelectionKeyDown(event) {
+  const escapeKeycode = (UiohookKey && UiohookKey.Escape) || 1;
+  if (event.keycode !== escapeKeycode) {
+    return;
+  }
+
+  const iconVisible = selectionIconWindow && selectionIconWindow.isVisible();
+  const cardVisible = selectionCardWindow && selectionCardWindow.isVisible();
+  if (iconVisible || cardVisible) {
+    hideSelectionCard();
+    hideSelectionIcon();
+  }
 }
 
 function startSelectionMouseWatcher() {
@@ -1033,6 +1463,7 @@ function startSelectionMouseWatcher() {
 
   hook.on('mousedown', handleSelectionMouseDown);
   hook.on('mouseup', handleSelectionMouseUp);
+  hook.on('keydown', handleSelectionKeyDown);
 
   try {
     hook.start();
@@ -1041,6 +1472,7 @@ function startSelectionMouseWatcher() {
     console.log(`[LinguaFix] Could not start mouse selection watcher: ${error.message}`);
     hook.removeListener('mousedown', handleSelectionMouseDown);
     hook.removeListener('mouseup', handleSelectionMouseUp);
+    hook.removeListener('keydown', handleSelectionKeyDown);
   }
 }
 
@@ -1051,6 +1483,7 @@ function stopSelectionMouseWatcher() {
 
   uIOhook.removeListener('mousedown', handleSelectionMouseDown);
   uIOhook.removeListener('mouseup', handleSelectionMouseUp);
+  uIOhook.removeListener('keydown', handleSelectionKeyDown);
 
   try {
     uIOhook.stop();
@@ -1059,6 +1492,7 @@ function stopSelectionMouseWatcher() {
   }
 
   selectionWatcherRunning = false;
+  hideSelectionCard();
   hideSelectionIcon();
 }
 
@@ -1249,6 +1683,18 @@ ipcMain.handle('linguafix:hide-popup', async () => {
 });
 ipcMain.on('linguafix:selection-icon-clicked', () => {
   void translatePendingSelection();
+});
+ipcMain.on('linguafix:selection-icon-hovered', () => {
+  void translatePendingSelection();
+});
+ipcMain.on('linguafix:selection-hover-in', (_event, target) => {
+  handleSelectionHoverIn(target);
+});
+ipcMain.on('linguafix:selection-hover-out', (_event, target) => {
+  handleSelectionHoverOut(target);
+});
+ipcMain.on('linguafix:selection-card-size', (_event, height) => {
+  applyCardBounds(Number(height) + 2);
 });
 
 app.whenReady().then(async () => {

@@ -13,6 +13,17 @@ contextBridge.exposeInMainWorld('linguafix', {
   processText: (request) => ipcRenderer.invoke('linguafix:process-text', request),
   hidePopup: () => ipcRenderer.invoke('linguafix:hide-popup'),
   notifySelectionIconClicked: () => ipcRenderer.send('linguafix:selection-icon-clicked'),
+  notifySelectionIconHovered: () => ipcRenderer.send('linguafix:selection-icon-hovered'),
+  notifySelectionHoverIn: (target) => ipcRenderer.send('linguafix:selection-hover-in', target),
+  notifySelectionHoverOut: (target) => ipcRenderer.send('linguafix:selection-hover-out', target),
+  reportSelectionCardSize: (height) => ipcRenderer.send('linguafix:selection-card-size', height),
+  onSelectionCardContent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('linguafix:selection-card-content', listener);
+    return () => {
+      ipcRenderer.removeListener('linguafix:selection-card-content', listener);
+    };
+  },
   onPopupSession: (callback) => {
     const listener = (_event, session) => callback(session);
     ipcRenderer.on('linguafix:popup-session', listener);

@@ -10,6 +10,7 @@
     "install:mac-app": "bash ./scripts/install-mac-app.sh"
   },
   "dependencies": {
+    "marked": "^16.4.1",
     "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
