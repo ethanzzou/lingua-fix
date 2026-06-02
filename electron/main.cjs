@@ -29,6 +29,34 @@ const SELECTION_CARD_MIN_HEIGHT = 48;
 const SELECTION_CARD_MAX_HEIGHT = 640;
 const SELECTION_DISMISS_GRACE_MS = 220;
 
+// The Cmd+C clipboard fallback exists only for terminals/tmux, which don't expose
+// AXSelectedText. Restricting it to these apps keeps the destructive clipboard dance away
+// from every other context — most importantly screenshot region-drags, whose image lands
+// on the clipboard asynchronously and would otherwise be clobbered.
+const TERMINAL_BUNDLE_IDS = new Set([
+  'com.mitchellh.ghostty',
+  'com.googlecode.iterm2',
+  'com.apple.Terminal',
+  'org.alacritty',
+  'net.kovidgoyal.kitty',
+  'com.github.wez.wezterm',
+  'io.alacritty',
+  'dev.warp.Warp-Stable',
+  'co.zeit.hyper',
+  'com.brave.tilix',
+]);
+const TERMINAL_NAME_PATTERN = /term|ghostty|iterm|alacritty|kitty|wezterm|warp|hyper|console|tmux/i;
+
+function isTerminalApp(app) {
+  if (!app) {
+    return false;
+  }
+  if (app.bundleIdentifier && TERMINAL_BUNDLE_IDS.has(app.bundleIdentifier)) {
+    return true;
+  }
+  return Boolean(app.name && TERMINAL_NAME_PATTERN.test(app.name));
+}
+
 let mainWindow = null;
 let popupWindow = null;
 let popupIgnoreBlurUntil = 0;
@@ -321,7 +349,36 @@ function macAppProcessLookupScript(macApp) {
   `;
 }
 
+// True when the clipboard holds image/non-text content (e.g. a screenshot just taken
+// with another tool's shortcut). The selection workflow is text-only, so writing a
+// sentinel or restoring a text backup over an image would silently destroy it — callers
+// must bail out instead of touching the clipboard in that case.
+function clipboardHoldsNonTextContent() {
+  try {
+    // readImage() is format-agnostic — macOS screenshots arrive as TIFF/public.* and
+    // wouldn't match an "image/" MIME prefix, but readImage() resolves them all.
+    const hasImage = !clipboard.readImage().isEmpty();
+    if (!hasImage) {
+      return false;
+    }
+    // An image is present; only treat it as "owned by something else" when there's no
+    // usable text alongside it (some apps put both image + text on the clipboard).
+    return clipboard.readText().trim().length === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function readSelectedTextFromMacClipboard(clipboardBackup) {
+  // Refuse to write the sentinel over an image/non-text clipboard (e.g. a fresh
+  // screenshot). The text-only backup can't restore it, so we'd destroy it.
+  if (clipboardHoldsNonTextContent()) {
+    return {
+      clipboardBackup,
+      selectedText: '',
+    };
+  }
+
   const clipboardSentinel = `__LINGUAFIX_SELECTION__${Date.now()}__`;
 
   clipboard.writeText(clipboardSentinel);
@@ -1317,6 +1374,12 @@ async function captureSelection() {
     return;
   }
 
+  // A screenshot/region drag from another tool lands an image on the clipboard. Never run
+  // the text selection workflow against it — doing so would clobber the screenshot.
+  if (clipboardHoldsNonTextContent()) {
+    return;
+  }
+
   isCapturingSelection = true;
 
   try {
@@ -1334,7 +1397,17 @@ async function captureSelection() {
     }
 
     if (!selectedText) {
-      // Fall back to the Cmd+C reader; restore the clipboard afterwards.
+      // The destructive Cmd+C fallback (sentinel write + simulated copy + clipboard
+      // restore) is ONLY safe for terminals/tmux, which is the sole reason it exists.
+      // Anywhere else — most importantly a screenshot region-drag, whose image is written
+      // to the clipboard asynchronously and can't be sampled reliably — we must not touch
+      // the clipboard at all. Accessibility already covers normal GUI apps.
+      const frontmostApp = await getFrontmostMacApp();
+
+      if (!isTerminalApp(frontmostApp) || clipboardHoldsNonTextContent()) {
+        return;
+      }
+
       const selectionState = await readSelectedTextFromMacApp();
       selectedText = selectionState.selectedText.trim();
 
