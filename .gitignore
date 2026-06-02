@@ -15,3 +15,6 @@ DerivedData/
 /dist
 /frontend/node_modules
 /frontend/dist
+
+# Build artifacts
+*.zip
