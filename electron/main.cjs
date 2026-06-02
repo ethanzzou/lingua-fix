@@ -24,8 +24,9 @@ const SELECTION_ICON_TIMEOUT_MS = 4000;
 const SELECTION_CONFIG_POLL_INTERVAL_MS = 4000;
 const SELECTION_ACCESSIBILITY_NOTICE_INTERVAL_MS = 60000;
 const SELECTION_CARD_WIDTH = 460;
+const SELECTION_CARD_MAX_WIDTH = 760;
 const SELECTION_CARD_MIN_HEIGHT = 48;
-const SELECTION_CARD_MAX_HEIGHT = 480;
+const SELECTION_CARD_MAX_HEIGHT = 640;
 const SELECTION_DISMISS_GRACE_MS = 220;
 
 let mainWindow = null;
@@ -907,16 +908,40 @@ function scrubHtml(html) {
     .replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*/gi, '$1=$2#');
 }
 
+// Detect content that is *already* a rendered/aligned layout rather than Markdown
+// source — e.g. a terminal table with box-drawing borders, or several lines of
+// pipe-aligned columns. Re-parsing such text as Markdown turns border rules into
+// <hr> and bare pipes into literal text (the broken-table bug). Render it verbatim
+// in a monospace <pre> instead so column alignment survives.
+function looksLikeRenderedLayout(text) {
+  if (/[│─┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╠╣╦╩╬]/.test(text)) {
+    return true;
+  }
+  const lines = String(text).split('\n');
+  const pipeRows = lines.filter((line) => (line.match(/\|/g) || []).length >= 2).length;
+  // A valid GFM table carries a delimiter row (|---|---|); let `marked` render
+  // those as real tables. Pipe-aligned text *without* one is a rendered/terminal
+  // table that should stay monospaced.
+  const hasDelimiterRow = lines.some((line) => /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|/.test(line));
+  return pipeRows >= 2 && !hasDelimiterRow;
+}
+
 function renderSelectionMarkdown(text) {
+  const source = String(text);
+
+  if (looksLikeRenderedLayout(source)) {
+    return `<pre>${escapeHtml(source)}</pre>`;
+  }
+
   const renderer = loadMarked();
   if (!renderer) {
-    return `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+    return `<p>${escapeHtml(source).replace(/\n/g, '<br/>')}</p>`;
   }
 
   try {
-    return scrubHtml(renderer.parse(String(text), { gfm: true, breaks: true }));
+    return scrubHtml(renderer.parse(source, { gfm: true }));
   } catch (_) {
-    return `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+    return `<p>${escapeHtml(source).replace(/\n/g, '<br/>')}</p>`;
   }
 }
 
@@ -1011,7 +1036,13 @@ function selectionCardHtml() {
 
       function reportSize() {
         if (window.linguafix && window.linguafix.reportSelectionCardSize) {
-          window.linguafix.reportSelectionCardSize(Math.ceil(card.scrollHeight));
+          // content.scrollWidth exceeds the visible width only when something
+          // (e.g. a monospace <pre> table) can't wrap; add the card's horizontal
+          // chrome (padding 18*2 + border 1*2) so the window can grow to fit it.
+          window.linguafix.reportSelectionCardSize({
+            height: Math.ceil(card.scrollHeight),
+            width: Math.ceil(content.scrollWidth) + 38,
+          });
         }
       }
 
@@ -1098,7 +1129,7 @@ function createSelectionCardWindow() {
   return selectionCardWindow;
 }
 
-function applyCardBounds(height) {
+function applyCardBounds(height, width) {
   if (!selectionCardWindow || selectionCardWindow.isDestroyed() || !cardAnchor) {
     return;
   }
@@ -1109,8 +1140,14 @@ function applyCardBounds(height) {
     SELECTION_CARD_MIN_HEIGHT,
     Math.min(height || SELECTION_CARD_MIN_HEIGHT, SELECTION_CARD_MAX_HEIGHT),
   );
+  // Grow horizontally to fit non-wrapping content, but never wider than the
+  // display's work area or our own cap.
+  const w = Math.max(
+    SELECTION_CARD_WIDTH,
+    Math.min(width || SELECTION_CARD_WIDTH, SELECTION_CARD_MAX_WIDTH, workArea.width),
+  );
 
-  let x = Math.min(cardAnchor.x, workArea.x + workArea.width - SELECTION_CARD_WIDTH);
+  let x = Math.min(cardAnchor.x, workArea.x + workArea.width - w);
   x = Math.max(x, workArea.x);
 
   let y = cardAnchor.y;
@@ -1123,7 +1160,7 @@ function applyCardBounds(height) {
   selectionCardWindow.setBounds({
     x: Math.round(x),
     y: Math.round(y),
-    width: SELECTION_CARD_WIDTH,
+    width: Math.round(w),
     height: Math.round(h),
   });
 }
@@ -1693,8 +1730,10 @@ ipcMain.on('linguafix:selection-hover-in', (_event, target) => {
 ipcMain.on('linguafix:selection-hover-out', (_event, target) => {
   handleSelectionHoverOut(target);
 });
-ipcMain.on('linguafix:selection-card-size', (_event, height) => {
-  applyCardBounds(Number(height) + 2);
+ipcMain.on('linguafix:selection-card-size', (_event, size) => {
+  const height = size && typeof size === 'object' ? size.height : size;
+  const width = size && typeof size === 'object' ? size.width : undefined;
+  applyCardBounds(Number(height) + 2, width != null ? Number(width) : undefined);
 });
 
 app.whenReady().then(async () => {

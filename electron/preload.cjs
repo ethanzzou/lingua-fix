@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('linguafix', {
   notifySelectionIconHovered: () => ipcRenderer.send('linguafix:selection-icon-hovered'),
   notifySelectionHoverIn: (target) => ipcRenderer.send('linguafix:selection-hover-in', target),
   notifySelectionHoverOut: (target) => ipcRenderer.send('linguafix:selection-hover-out', target),
-  reportSelectionCardSize: (height) => ipcRenderer.send('linguafix:selection-card-size', height),
+  reportSelectionCardSize: (size) => ipcRenderer.send('linguafix:selection-card-size', size),
   onSelectionCardContent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('linguafix:selection-card-content', listener);

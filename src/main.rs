@@ -48,7 +48,7 @@ Determine the primary language of the input:
 Preserve names, technical terms, numbers, URLs, code, and formatting unless a minor language correction is clearly needed. Do not add new information, omit meaning, summarize, explain, or change the user's intent.
 
 Return only the final transformed text."#;
-const DEFAULT_ENGLISH_TO_CHINESE_PROMPT: &str = "Translate the English input into natural, accurate Simplified Chinese while preserving meaning, tone, and formatting when possible. Return only the final Chinese translation with no explanation.";
+const DEFAULT_ENGLISH_TO_CHINESE_PROMPT: &str = "Translate the English input into natural, accurate Simplified Chinese while preserving meaning, tone, and formatting when possible. If the input is a table, output a valid GitHub-flavored Markdown table with a proper |---| delimiter row; otherwise output plain text. Never output a partially-formatted or half-rendered table. Return only the final Chinese translation with no explanation.";
 const TRANSLATION_LOG_FILE_NAME: &str = "translations.sqlite3";
 const TRANSLATION_LOG_RETENTION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const DEFAULT_HISTORY_PAGE_SIZE: usize = 12;
