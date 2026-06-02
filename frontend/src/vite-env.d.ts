@@ -22,6 +22,7 @@ declare global {
       saveConfig: (config: AppConfig) => Promise<AppConfig>
       processText: (request: ProcessRequest) => Promise<ProcessResponse>
       hidePopup: () => Promise<void>
+      notifySelectionIconClicked: () => void
       onPopupSession: (callback: (session: PopupSession) => void) => () => void
       onShowQuickTranslateOverlay: (callback: () => void) => () => void
     }

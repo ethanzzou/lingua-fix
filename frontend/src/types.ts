@@ -17,6 +17,7 @@ export type AppConfig = {
   base_url: string
   translation_prompt: string
   data_dir: string
+  selection_popup_enabled: boolean
 }
 
 export type HistoryRecord = {

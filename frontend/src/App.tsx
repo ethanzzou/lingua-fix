@@ -50,6 +50,7 @@ function App() {
     base_url: '',
     translation_prompt: DEFAULT_TRANSLATION_PROMPT,
     data_dir: '',
+    selection_popup_enabled: true,
   })
   const [input, setInput] = useState('')
   const [previousInput, setPreviousInput] = useState('')
@@ -777,6 +778,32 @@ function App() {
                   </small>
                 </div>
               </label>
+
+              <div className="settings-row">
+                <span>Selection translation</span>
+                <div className="settings-control">
+                  <div className="settings-action-row">
+                    <button
+                      type="button"
+                      className={`toolbar-chip${config.selection_popup_enabled ? ' toolbar-chip-primary' : ''}`}
+                      onClick={() => {
+                        const nextConfig = {
+                          ...config,
+                          selection_popup_enabled: !config.selection_popup_enabled,
+                        }
+                        setConfig(nextConfig)
+                        void persistConfig(nextConfig)
+                      }}
+                    >
+                      {config.selection_popup_enabled ? 'On' : 'Off'}
+                    </button>
+                  </div>
+                  <small>
+                    Show a floating translation icon when you select text with the mouse in any
+                    app (macOS). Requires Accessibility and Input Monitoring permissions.
+                  </small>
+                </div>
+              </div>
 
               <label className="settings-row settings-row-prompt">
                 <span>Translation prompt</span>

@@ -70,6 +70,7 @@ async fn main() -> Result<(), String> {
         .route("/api/history/{id}/bookmark", put(update_history_bookmark))
         .route("/api/history/{id}/tags", put(update_history_tags))
         .route("/api/process", post(process_text))
+        .route("/api/selection", get(get_selection))
         .with_state(state);
 
     let address = SocketAddr::from(([127, 0, 0, 1], port));
@@ -93,6 +94,97 @@ async fn get_config() -> Result<Json<AppConfig>, ApiError> {
     Ok(Json(AppConfig::load()))
 }
 
+async fn get_selection() -> Json<SelectionResponse> {
+    Json(read_focused_selection())
+}
+
+// Copy the named accessibility attribute off `element`, returning the +1-owned CF value
+// wrapped so the Rust side releases it. A non-zero AXError or a null result is "absent".
+//
+// SAFETY: `AXUIElementCopyAttributeValue` follows the Core Foundation "Copy" rule, so the
+// returned ref is owned by us; `wrap_under_create_rule` takes that ownership. Callers must
+// only pass a valid element ref.
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_attribute(
+    element: accessibility_sys::AXUIElementRef,
+    name: &str,
+) -> Option<core_foundation::base::CFType> {
+    use accessibility_sys::AXUIElementCopyAttributeValue;
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    use std::ptr;
+
+    let attr = CFString::new(name);
+    let mut value: CFTypeRef = ptr::null();
+    let err =
+        unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
+    if err != 0 || value.is_null() {
+        return None;
+    }
+
+    Some(unsafe { CFType::wrap_under_create_rule(value) })
+}
+
+#[cfg(target_os = "macos")]
+fn read_focused_selection() -> SelectionResponse {
+    use accessibility_sys::{
+        kAXFocusedUIElementAttribute, kAXSelectedTextAttribute, AXIsProcessTrusted,
+        AXUIElementCreateSystemWide, AXUIElementRef,
+    };
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    let trusted = unsafe { AXIsProcessTrusted() };
+    if !trusted {
+        return SelectionResponse {
+            trusted: false,
+            text: String::new(),
+        };
+    }
+
+    let text = unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return SelectionResponse {
+                trusted,
+                text: String::new(),
+            };
+        }
+        // System-wide element is created with a +1 reference we are responsible for.
+        let _system_wide_guard = CFType::wrap_under_create_rule(system_wide as CFTypeRef);
+
+        let Some(focused) = ax_copy_attribute(system_wide, kAXFocusedUIElementAttribute) else {
+            return SelectionResponse {
+                trusted,
+                text: String::new(),
+            };
+        };
+
+        let selected = ax_copy_attribute(
+            focused.as_CFTypeRef() as AXUIElementRef,
+            kAXSelectedTextAttribute,
+        );
+
+        match selected.and_then(|value| value.downcast::<CFString>()) {
+            Some(string) => string.to_string(),
+            None => String::new(),
+        }
+    };
+
+    SelectionResponse {
+        trusted,
+        text: text.trim().to_owned(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_focused_selection() -> SelectionResponse {
+    SelectionResponse {
+        trusted: true,
+        text: String::new(),
+    }
+}
+
 async fn save_config(Json(config): Json<AppConfig>) -> Result<Json<AppConfig>, ApiError> {
     let default_model = config.provider.default_model();
     let normalized = AppConfig {
@@ -106,6 +198,7 @@ async fn save_config(Json(config): Json<AppConfig>) -> Result<Json<AppConfig>, A
         base_url: config.base_url.trim().to_owned(),
         translation_prompt: normalize_translation_prompt(&config.translation_prompt),
         data_dir: normalize_data_dir(&config.data_dir),
+        selection_popup_enabled: config.selection_popup_enabled,
     };
 
     TranslationLogStore::prepare(PathBuf::from(&normalized.data_dir))
@@ -129,6 +222,7 @@ async fn process_text(
         base_url,
         translation_prompt,
         data_dir,
+        selection_popup_enabled: _,
     } = AppConfig::load();
     let text = request.text.trim().to_owned();
 
@@ -317,6 +411,12 @@ struct HealthResponse {
 }
 
 #[derive(Serialize)]
+struct SelectionResponse {
+    trusted: bool,
+    text: String,
+}
+
+#[derive(Serialize)]
 struct HistoryResponse {
     records: Vec<TranslationRecord>,
     pagination: HistoryPagination,
@@ -483,6 +583,8 @@ struct AppConfig {
     translation_prompt: String,
     #[serde(default = "default_data_dir")]
     data_dir: String,
+    #[serde(default = "default_selection_popup_enabled")]
+    selection_popup_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -494,6 +596,7 @@ impl Default for AppConfig {
             base_url: String::new(),
             translation_prompt: default_translation_prompt(),
             data_dir: default_data_dir(),
+            selection_popup_enabled: default_selection_popup_enabled(),
         }
     }
 }
@@ -541,6 +644,10 @@ impl AppConfig {
 
 fn default_translation_prompt() -> String {
     DEFAULT_TRANSLATION_PROMPT.to_owned()
+}
+
+fn default_selection_popup_enabled() -> bool {
+    true
 }
 
 fn normalize_translation_prompt(value: &str) -> String {

@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('linguafix', {
   saveConfig: (config) => ipcRenderer.invoke('linguafix:save-config', config),
   processText: (request) => ipcRenderer.invoke('linguafix:process-text', request),
   hidePopup: () => ipcRenderer.invoke('linguafix:hide-popup'),
+  notifySelectionIconClicked: () => ipcRenderer.send('linguafix:selection-icon-clicked'),
   onPopupSession: (callback) => {
     const listener = (_event, session) => callback(session);
     ipcRenderer.on('linguafix:popup-session', listener);

@@ -16,6 +16,13 @@ const execFile = promisify(require('node:child_process').execFile);
 const AUTOMATION_COPY_POLL_ATTEMPTS = 10;
 const AUTOMATION_COPY_POLL_DELAY_MS = 30;
 const AUTOMATION_PASTE_RESTORE_DELAY_MS = 80;
+const SELECTION_DRAG_THRESHOLD_PX = 6;
+const SELECTION_CAPTURE_DEBOUNCE_MS = 250;
+const SELECTION_MIN_TEXT_LENGTH = 2;
+const SELECTION_ICON_SIZE = 28;
+const SELECTION_ICON_TIMEOUT_MS = 4000;
+const SELECTION_CONFIG_POLL_INTERVAL_MS = 4000;
+const SELECTION_ACCESSIBILITY_NOTICE_INTERVAL_MS = 60000;
 
 let mainWindow = null;
 let popupWindow = null;
@@ -26,6 +33,17 @@ let ownsServiceProcess = false;
 let isQuitting = false;
 let isRunningSelectionWorkflow = false;
 let statusBarItem = null;
+let selectionIconWindow = null;
+let uIOhook = null;
+let selectionWatcherRunning = false;
+let selectionPopupEnabled = false;
+let selectionConfigPollTimer = null;
+let selectionMouseDownPoint = null;
+let selectionCaptureTimer = null;
+let isCapturingSelection = false;
+let pendingSelectionText = '';
+let selectionIconDismissTimer = null;
+let selectionAccessibilityNoticeAt = 0;
 
 function isDev() {
   return !app.isPackaged;
@@ -710,6 +728,366 @@ async function tryTranslateSelectedTextToChineseInPopup() {
   }
 }
 
+function selectionIconHtml() {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+      #icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 15px;
+        font-weight: 600;
+        color: #ffffff;
+        background: #2f6df6;
+        border-radius: 7px;
+        cursor: pointer;
+        -webkit-user-select: none;
+        user-select: none;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
+      }
+      #icon:active {
+        background: #2257d6;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="icon" title="Translate selection">译</div>
+    <script>
+      document.getElementById('icon').addEventListener('click', () => {
+        window.linguafix && window.linguafix.notifySelectionIconClicked();
+      });
+    </script>
+  </body>
+</html>`;
+}
+
+function createSelectionIconWindow() {
+  if (selectionIconWindow && !selectionIconWindow.isDestroyed()) {
+    return selectionIconWindow;
+  }
+
+  selectionIconWindow = new BrowserWindow({
+    width: SELECTION_ICON_SIZE,
+    height: SELECTION_ICON_SIZE,
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    backgroundColor: '#00000000',
+    ...(process.platform === 'darwin' ? { type: 'panel' } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  if (process.platform === 'darwin') {
+    selectionIconWindow.setHiddenInMissionControl(true);
+    selectionIconWindow.setAlwaysOnTop(true, 'floating');
+    selectionIconWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } else {
+    selectionIconWindow.setAlwaysOnTop(true);
+  }
+
+  selectionIconWindow.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(selectionIconHtml())}`,
+  );
+
+  selectionIconWindow.on('closed', () => {
+    selectionIconWindow = null;
+  });
+
+  return selectionIconWindow;
+}
+
+function isPointInsideSelectionIcon(point) {
+  if (!selectionIconWindow || selectionIconWindow.isDestroyed() || !selectionIconWindow.isVisible()) {
+    return false;
+  }
+
+  const bounds = selectionIconWindow.getBounds();
+  return (
+    point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
+  );
+}
+
+function showSelectionIcon(text) {
+  pendingSelectionText = text;
+
+  const window = createSelectionIconWindow();
+  const cursor = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursor);
+  const workArea = display.workArea;
+  let x = cursor.x + 12;
+  let y = cursor.y + 16;
+  x = Math.min(x, workArea.x + workArea.width - SELECTION_ICON_SIZE);
+  y = Math.min(y, workArea.y + workArea.height - SELECTION_ICON_SIZE);
+  window.setPosition(Math.round(x), Math.round(y));
+  window.showInactive();
+  window.moveTop();
+
+  if (selectionIconDismissTimer) {
+    clearTimeout(selectionIconDismissTimer);
+  }
+  selectionIconDismissTimer = setTimeout(hideSelectionIcon, SELECTION_ICON_TIMEOUT_MS);
+}
+
+function hideSelectionIcon() {
+  if (selectionIconDismissTimer) {
+    clearTimeout(selectionIconDismissTimer);
+    selectionIconDismissTimer = null;
+  }
+
+  pendingSelectionText = '';
+
+  if (selectionIconWindow && !selectionIconWindow.isDestroyed() && selectionIconWindow.isVisible()) {
+    selectionIconWindow.hide();
+  }
+}
+
+function ownWindowIsFocused() {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (!focused) {
+    return false;
+  }
+
+  return focused === popupWindow || focused === selectionIconWindow;
+}
+
+function maybeNotifyAccessibilityRequired() {
+  const now = Date.now();
+  if (now - selectionAccessibilityNoticeAt < SELECTION_ACCESSIBILITY_NOTICE_INTERVAL_MS) {
+    return;
+  }
+
+  selectionAccessibilityNoticeAt = now;
+  notify(
+    'Grant Accessibility access to LinguaFix in System Settings → Privacy & Security to read selected text.',
+  );
+}
+
+async function readSelectionViaAccessibility() {
+  try {
+    const result = await callService('/api/selection');
+
+    if (result && result.trusted === false) {
+      maybeNotifyAccessibilityRequired();
+      return '';
+    }
+
+    return typeof result?.text === 'string' ? result.text.trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function captureSelection() {
+  if (isCapturingSelection || isRunningSelectionWorkflow || ownWindowIsFocused()) {
+    return;
+  }
+
+  isCapturingSelection = true;
+
+  try {
+    let selectedText = await readSelectionViaAccessibility();
+
+    if (!selectedText) {
+      // Fall back to the Cmd+C reader; restore the clipboard afterwards.
+      const selectionState = await readSelectedTextFromMacApp();
+      selectedText = selectionState.selectedText.trim();
+
+      if (typeof selectionState.clipboardBackup === 'string') {
+        clipboard.writeText(selectionState.clipboardBackup);
+      }
+    }
+
+    if (selectedText.length < SELECTION_MIN_TEXT_LENGTH) {
+      return;
+    }
+
+    if (selectionIconWindow && selectionIconWindow.isVisible() && selectedText === pendingSelectionText) {
+      return;
+    }
+
+    showSelectionIcon(selectedText);
+  } catch (_) {
+    // Selection reads are best-effort; never surface an error from a stray drag.
+  } finally {
+    isCapturingSelection = false;
+  }
+}
+
+async function translatePendingSelection() {
+  const text = pendingSelectionText;
+  hideSelectionIcon();
+
+  if (!text || isRunningSelectionWorkflow) {
+    return;
+  }
+
+  isRunningSelectionWorkflow = true;
+
+  try {
+    const response = await callService('/api/process', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: 'translate_english_to_chinese',
+        text,
+      }),
+    });
+
+    showSelectedTextTranslationPopup(text, response.output);
+  } catch (error) {
+    notify(
+      error instanceof Error ? error.message : 'Could not translate the selected text.',
+    );
+  } finally {
+    isRunningSelectionWorkflow = false;
+  }
+}
+
+function handleSelectionMouseDown(event) {
+  selectionMouseDownPoint = { x: event.x, y: event.y, button: event.button };
+
+  // A click anywhere outside the icon dismisses it (outside-click + new-selection).
+  if (selectionIconWindow && selectionIconWindow.isVisible()) {
+    if (!isPointInsideSelectionIcon(screen.getCursorScreenPoint())) {
+      hideSelectionIcon();
+    }
+  }
+}
+
+function handleSelectionMouseUp(event) {
+  const down = selectionMouseDownPoint;
+  selectionMouseDownPoint = null;
+
+  if (!down || down.button !== 1 || event.button !== 1) {
+    return;
+  }
+
+  const movedFarEnough =
+    Math.abs(event.x - down.x) >= SELECTION_DRAG_THRESHOLD_PX ||
+    Math.abs(event.y - down.y) >= SELECTION_DRAG_THRESHOLD_PX;
+
+  if (!movedFarEnough) {
+    return;
+  }
+
+  if (selectionCaptureTimer) {
+    clearTimeout(selectionCaptureTimer);
+  }
+  selectionCaptureTimer = setTimeout(() => {
+    void captureSelection();
+  }, SELECTION_CAPTURE_DEBOUNCE_MS);
+}
+
+function loadUiohook() {
+  if (uIOhook) {
+    return uIOhook;
+  }
+
+  try {
+    ({ uIOhook } = require('uiohook-napi'));
+  } catch (error) {
+    console.log(`[LinguaFix] Mouse selection watcher unavailable: ${error.message}`);
+    uIOhook = null;
+  }
+
+  return uIOhook;
+}
+
+function startSelectionMouseWatcher() {
+  if (selectionWatcherRunning || process.platform !== 'darwin') {
+    return;
+  }
+
+  const hook = loadUiohook();
+  if (!hook) {
+    return;
+  }
+
+  hook.on('mousedown', handleSelectionMouseDown);
+  hook.on('mouseup', handleSelectionMouseUp);
+
+  try {
+    hook.start();
+    selectionWatcherRunning = true;
+  } catch (error) {
+    console.log(`[LinguaFix] Could not start mouse selection watcher: ${error.message}`);
+    hook.removeListener('mousedown', handleSelectionMouseDown);
+    hook.removeListener('mouseup', handleSelectionMouseUp);
+  }
+}
+
+function stopSelectionMouseWatcher() {
+  if (!selectionWatcherRunning || !uIOhook) {
+    return;
+  }
+
+  uIOhook.removeListener('mousedown', handleSelectionMouseDown);
+  uIOhook.removeListener('mouseup', handleSelectionMouseUp);
+
+  try {
+    uIOhook.stop();
+  } catch (_) {
+    // Ignore stop failures during teardown.
+  }
+
+  selectionWatcherRunning = false;
+  hideSelectionIcon();
+}
+
+async function refreshSelectionPopupEnabled() {
+  try {
+    const config = await callService('/config');
+    selectionPopupEnabled = Boolean(config?.selection_popup_enabled);
+  } catch (_) {
+    return;
+  }
+
+  if (selectionPopupEnabled) {
+    startSelectionMouseWatcher();
+  } else {
+    stopSelectionMouseWatcher();
+  }
+}
+
+function initSelectionMouseWatcher() {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  void refreshSelectionPopupEnabled();
+  selectionConfigPollTimer = setInterval(() => {
+    void refreshSelectionPopupEnabled();
+  }, SELECTION_CONFIG_POLL_INTERVAL_MS);
+}
+
 function registerGlobalHotkeys() {
   globalShortcut.register(IN_PLACE_TRANSLATE_HOTKEY, async () => {
     await tryProcessSelectedTextInPlace();
@@ -869,6 +1247,9 @@ ipcMain.handle('linguafix:clear-history', async () =>
 ipcMain.handle('linguafix:hide-popup', async () => {
   hideQuickTranslatePopup();
 });
+ipcMain.on('linguafix:selection-icon-clicked', () => {
+  void translatePendingSelection();
+});
 
 app.whenReady().then(async () => {
   if (isPopupHelperProcess() && process.platform === 'darwin') {
@@ -879,6 +1260,7 @@ app.whenReady().then(async () => {
     await ensureRustService();
     createPopupWindow();
     registerGlobalHotkeys();
+    initSelectionMouseWatcher();
     return;
   }
 
@@ -920,6 +1302,12 @@ app.on('before-quit', () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
   destroyStatusBarItem();
+
+  if (selectionConfigPollTimer) {
+    clearInterval(selectionConfigPollTimer);
+    selectionConfigPollTimer = null;
+  }
+  stopSelectionMouseWatcher();
 
   if (!isPopupHelperProcess()) {
     stopPopupHelperProcess();

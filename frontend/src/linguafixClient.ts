@@ -20,6 +20,7 @@ let demoConfig: AppConfig = {
   base_url: '',
   translation_prompt: DEFAULT_TRANSLATION_PROMPT,
   data_dir: '~/LinguaFix',
+  selection_popup_enabled: true,
 }
 
 let demoHistory: HistoryRecord[] = [
@@ -90,6 +91,7 @@ const demoClient: LinguaFixClient = {
   },
   processText: async (request) => processDemoText(request),
   hidePopup: async () => undefined,
+  notifySelectionIconClicked: () => undefined,
   onPopupSession: () => noop,
   onShowQuickTranslateOverlay: () => noop,
 }

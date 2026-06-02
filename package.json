@@ -9,6 +9,9 @@
     "start": "electron .",
     "install:mac-app": "bash ./scripts/install-mac-app.sh"
   },
+  "dependencies": {
+    "uiohook-napi": "^1.5.5"
+  },
   "devDependencies": {
     "concurrently": "^9.2.1",
     "electron": "^37.7.0",
