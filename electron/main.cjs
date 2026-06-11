@@ -838,7 +838,7 @@ function selectionIconHtml() {
     </style>
   </head>
   <body>
-    <div id="icon" title="Translate selection">译</div>
+    <div id="icon" title="Translate selection">T</div>
     <script>
       const icon = document.getElementById('icon');
       icon.addEventListener('click', () => {
@@ -1086,7 +1086,7 @@ function selectionCardHtml() {
     </style>
   </head>
   <body>
-    <div id="card"><div id="content" class="loading">翻译中…</div></div>
+    <div id="card"><div id="content" class="loading">Translating…</div></div>
     <script>
       const card = document.getElementById('card');
       const content = document.getElementById('content');
@@ -1114,7 +1114,7 @@ function selectionCardHtml() {
         window.linguafix.onSelectionCardContent((payload) => {
           if (payload && payload.loading) {
             content.className = 'loading';
-            content.textContent = (payload && payload.text) || '翻译中…';
+            content.textContent = (payload && payload.text) || 'Translating…';
           } else {
             content.className = '';
             content.innerHTML = (payload && payload.html) || '';
@@ -1236,7 +1236,7 @@ function sendSelectionCard(payload) {
 }
 
 function setSelectionCardLoading() {
-  sendSelectionCard({ loading: true, text: '翻译中…' });
+  sendSelectionCard({ loading: true, text: 'Translating…' });
 }
 
 function setSelectionCardContent(html) {
