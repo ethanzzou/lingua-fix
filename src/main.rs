@@ -126,10 +126,94 @@ unsafe fn ax_copy_attribute(
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn ax_copy_parameterized_attribute(
+    element: accessibility_sys::AXUIElementRef,
+    name: &str,
+    parameter: core_foundation::base::CFTypeRef,
+) -> Option<core_foundation::base::CFType> {
+    use accessibility_sys::AXUIElementCopyParameterizedAttributeValue;
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    use std::ptr;
+
+    let attr = CFString::new(name);
+    let mut value: CFTypeRef = ptr::null();
+    let err = unsafe {
+        AXUIElementCopyParameterizedAttributeValue(
+            element,
+            attr.as_concrete_TypeRef(),
+            parameter,
+            &mut value,
+        )
+    };
+    if err != 0 || value.is_null() {
+        return None;
+    }
+
+    Some(unsafe { CFType::wrap_under_create_rule(value) })
+}
+
+#[cfg(target_os = "macos")]
+fn ax_cf_range(value: &core_foundation::base::CFType) -> Option<core_foundation::base::CFRange> {
+    use accessibility_sys::{
+        AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCFRange,
+    };
+    use core_foundation::base::{CFRange, TCFType};
+    use std::ffi::c_void;
+
+    if value.type_of() != unsafe { AXValueGetTypeID() } {
+        return None;
+    }
+
+    let ax_value = value.as_CFTypeRef() as accessibility_sys::AXValueRef;
+    if unsafe { AXValueGetType(ax_value) } != kAXValueTypeCFRange {
+        return None;
+    }
+
+    let mut range = CFRange::init(0, 0);
+    let ok = unsafe {
+        AXValueGetValue(
+            ax_value,
+            kAXValueTypeCFRange,
+            &mut range as *mut CFRange as *mut c_void,
+        )
+    };
+
+    if ok { Some(range) } else { None }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn read_selected_text_from_range(
+    element: accessibility_sys::AXUIElementRef,
+) -> Option<String> {
+    use accessibility_sys::{
+        kAXSelectedTextRangeAttribute, kAXStringForRangeParameterizedAttribute,
+    };
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    let range_value = unsafe { ax_copy_attribute(element, kAXSelectedTextRangeAttribute) }?;
+    let range = ax_cf_range(&range_value)?;
+    if range.length <= 0 {
+        return None;
+    }
+
+    let text = unsafe {
+        ax_copy_parameterized_attribute(
+            element,
+            kAXStringForRangeParameterizedAttribute,
+            range_value.as_CFTypeRef(),
+        )
+    }?;
+
+    text.downcast::<CFString>().map(|string| string.to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn read_focused_selection() -> SelectionResponse {
     use accessibility_sys::{
-        kAXFocusedUIElementAttribute, kAXSelectedTextAttribute, AXIsProcessTrusted,
-        AXUIElementCreateSystemWide, AXUIElementRef,
+        AXIsProcessTrusted, AXUIElementCreateSystemWide, AXUIElementRef,
+        kAXFocusedUIElementAttribute, kAXSelectedTextAttribute,
     };
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
@@ -160,14 +244,18 @@ fn read_focused_selection() -> SelectionResponse {
             };
         };
 
-        let selected = ax_copy_attribute(
-            focused.as_CFTypeRef() as AXUIElementRef,
-            kAXSelectedTextAttribute,
-        );
+        let focused_ref = focused.as_CFTypeRef() as AXUIElementRef;
+        let selected = ax_copy_attribute(focused_ref, kAXSelectedTextAttribute);
 
-        match selected.and_then(|value| value.downcast::<CFString>()) {
+        let direct_text = match selected.and_then(|value| value.downcast::<CFString>()) {
             Some(string) => string.to_string(),
             None => String::new(),
+        };
+
+        if direct_text.trim().is_empty() {
+            read_selected_text_from_range(focused_ref).unwrap_or_default()
+        } else {
+            direct_text
         }
     };
 

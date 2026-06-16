@@ -29,10 +29,10 @@ const SELECTION_CARD_MIN_HEIGHT = 48;
 const SELECTION_CARD_MAX_HEIGHT = 640;
 const SELECTION_DISMISS_GRACE_MS = 220;
 
-// The Cmd+C clipboard fallback exists only for terminals/tmux, which don't expose
-// AXSelectedText. Restricting it to these apps keeps the destructive clipboard dance away
-// from every other context — most importantly screenshot region-drags, whose image lands
-// on the clipboard asynchronously and would otherwise be clobbered.
+// The Cmd+C clipboard fallback exists only for apps that do not expose AXSelectedText but
+// have a reliable native copy command. Restricting it to known apps keeps the clipboard
+// dance away from every other context — most importantly screenshot region-drags, whose
+// image lands on the clipboard asynchronously and would otherwise be clobbered.
 const TERMINAL_BUNDLE_IDS = new Set([
   'com.mitchellh.ghostty',
   'com.googlecode.iterm2',
@@ -46,6 +46,10 @@ const TERMINAL_BUNDLE_IDS = new Set([
   'com.brave.tilix',
 ]);
 const TERMINAL_NAME_PATTERN = /term|ghostty|iterm|alacritty|kitty|wezterm|warp|hyper|console|tmux/i;
+const CLIPBOARD_FALLBACK_BUNDLE_IDS = new Set([
+  ...TERMINAL_BUNDLE_IDS,
+  'com.openai.codex',
+]);
 
 function isTerminalApp(app) {
   if (!app) {
@@ -55,6 +59,16 @@ function isTerminalApp(app) {
     return true;
   }
   return Boolean(app.name && TERMINAL_NAME_PATTERN.test(app.name));
+}
+
+function allowsClipboardSelectionFallback(app) {
+  if (!app) {
+    return false;
+  }
+  if (app.bundleIdentifier && CLIPBOARD_FALLBACK_BUNDLE_IDS.has(app.bundleIdentifier)) {
+    return true;
+  }
+  return isTerminalApp(app);
 }
 
 let mainWindow = null;
@@ -351,8 +365,8 @@ function macAppProcessLookupScript(macApp) {
 
 // True when the clipboard holds image/non-text content (e.g. a screenshot just taken
 // with another tool's shortcut). The selection workflow is text-only, so writing a
-// sentinel or restoring a text backup over an image would silently destroy it — callers
-// must bail out instead of touching the clipboard in that case.
+// sentinel during a racing screenshot capture could still destroy it — callers must bail
+// out instead of touching the clipboard in that case.
 function clipboardHoldsNonTextContent() {
   try {
     // readImage() is format-agnostic — macOS screenshots arrive as TIFF/public.* and
@@ -369,12 +383,73 @@ function clipboardHoldsNonTextContent() {
   }
 }
 
-async function readSelectedTextFromMacClipboard(clipboardBackup) {
+function readClipboardSnapshot() {
+  const snapshot = {
+    text: '',
+    formats: [],
+  };
+
+  try {
+    snapshot.text = clipboard.readText();
+  } catch (_) {
+    snapshot.text = '';
+  }
+
+  try {
+    for (const format of clipboard.availableFormats()) {
+      try {
+        const data = clipboard.readBuffer(format);
+        snapshot.formats.push({
+          format,
+          data: Buffer.from(data),
+        });
+      } catch (_) {
+        // Ignore individual formats that Electron cannot round-trip.
+      }
+    }
+  } catch (_) {
+    snapshot.formats = [];
+  }
+
+  return snapshot;
+}
+
+function restoreClipboardSnapshot(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+
+  try {
+    clipboard.clear();
+
+    if (Array.isArray(snapshot.formats) && snapshot.formats.length > 0) {
+      for (const item of snapshot.formats) {
+        clipboard.writeBuffer(item.format, Buffer.from(item.data));
+      }
+      return;
+    }
+
+    if (typeof snapshot.text === 'string' && snapshot.text.length > 0) {
+      clipboard.writeText(snapshot.text);
+    }
+  } catch (_) {
+    try {
+      if (typeof snapshot.text === 'string') {
+        clipboard.writeText(snapshot.text);
+      }
+    } catch (_) {
+      // Nothing else to do; clipboard restoration is best-effort.
+    }
+  }
+}
+
+async function readSelectedTextFromMacClipboard(clipboardSnapshot) {
   // Refuse to write the sentinel over an image/non-text clipboard (e.g. a fresh
-  // screenshot). The text-only backup can't restore it, so we'd destroy it.
+  // screenshot). Snapshot restoration is best-effort, and image clipboard writes from
+  // screenshot tools can still race this workflow, so do not touch that clipboard state.
   if (clipboardHoldsNonTextContent()) {
     return {
-      clipboardBackup,
+      clipboardSnapshot,
       selectedText: '',
     };
   }
@@ -392,24 +467,24 @@ async function readSelectedTextFromMacClipboard(clipboardBackup) {
 
     if (selectedText !== clipboardSentinel) {
       return {
-        clipboardBackup,
+        clipboardSnapshot,
         selectedText,
       };
     }
   }
 
-  clipboard.writeText(clipboardBackup);
+  restoreClipboardSnapshot(clipboardSnapshot);
 
   return {
-    clipboardBackup,
+    clipboardSnapshot,
     selectedText: '',
   };
 }
 
 async function readSelectedTextFromMacApp() {
-  const clipboardBackup = clipboard.readText();
+  const clipboardSnapshot = readClipboardSnapshot();
   const frontmostApp = await getFrontmostMacApp();
-  const clipboardSelectionState = await readSelectedTextFromMacClipboard(clipboardBackup);
+  const clipboardSelectionState = await readSelectedTextFromMacClipboard(clipboardSnapshot);
 
   return {
     ...clipboardSelectionState,
@@ -417,7 +492,7 @@ async function readSelectedTextFromMacApp() {
   };
 }
 
-async function replaceSelectionInMacApp(text, clipboardBackup, frontmostApp) {
+async function replaceSelectionInMacApp(text, clipboardSnapshot, frontmostApp) {
   clipboard.writeText(text);
   const processLookup = macAppProcessLookupScript(frontmostApp);
 
@@ -438,7 +513,7 @@ async function replaceSelectionInMacApp(text, clipboardBackup, frontmostApp) {
   }
 
   await sleep(AUTOMATION_PASTE_RESTORE_DELAY_MS);
-  clipboard.writeText(clipboardBackup);
+  restoreClipboardSnapshot(clipboardSnapshot);
 }
 
 async function tryProcessSelectedTextInPlace() {
@@ -452,15 +527,15 @@ async function tryProcessSelectedTextInPlace() {
   }
 
   isRunningSelectionWorkflow = true;
-  let clipboardBackup = null;
+  let clipboardSnapshot = null;
 
   try {
     const selectionState = await readSelectedTextFromMacApp();
-    clipboardBackup = selectionState.clipboardBackup;
+    clipboardSnapshot = selectionState.clipboardSnapshot;
     const { frontmostApp, selectedText } = selectionState;
 
     if (!selectedText.trim()) {
-      clipboard.writeText(clipboardBackup);
+      restoreClipboardSnapshot(clipboardSnapshot);
       notify('Could not read the current text selection.');
       return true;
     }
@@ -475,14 +550,12 @@ async function tryProcessSelectedTextInPlace() {
 
     await replaceSelectionInMacApp(
       response.output,
-      clipboardBackup,
+      clipboardSnapshot,
       frontmostApp,
     );
     return true;
   } catch (error) {
-    if (typeof clipboardBackup === 'string') {
-      clipboard.writeText(clipboardBackup);
-    }
+    restoreClipboardSnapshot(clipboardSnapshot);
 
     notify(
       error instanceof Error ? error.message : 'Could not process the selected text.',
@@ -762,15 +835,15 @@ async function tryTranslateSelectedTextToChineseInPopup() {
   }
 
   isRunningSelectionWorkflow = true;
-  let clipboardBackup = null;
+  let clipboardSnapshot = null;
 
   try {
     const selectionState = await readSelectedTextFromMacApp();
-    clipboardBackup = selectionState.clipboardBackup;
+    clipboardSnapshot = selectionState.clipboardSnapshot;
     const selectedText = selectionState.selectedText.trim();
 
     if (!selectedText) {
-      clipboard.writeText(clipboardBackup);
+      restoreClipboardSnapshot(clipboardSnapshot);
       notify('Could not read the current text selection.');
       return true;
     }
@@ -783,13 +856,11 @@ async function tryTranslateSelectedTextToChineseInPopup() {
       }),
     });
 
-    clipboard.writeText(clipboardBackup);
+    restoreClipboardSnapshot(clipboardSnapshot);
     showSelectedTextTranslationPopup(selectedText, response.output);
     return true;
   } catch (error) {
-    if (typeof clipboardBackup === 'string') {
-      clipboard.writeText(clipboardBackup);
-    }
+    restoreClipboardSnapshot(clipboardSnapshot);
 
     notify(
       error instanceof Error ? error.message : 'Could not translate the selected text.',
@@ -1397,23 +1468,20 @@ async function captureSelection() {
     }
 
     if (!selectedText) {
-      // The destructive Cmd+C fallback (sentinel write + simulated copy + clipboard
-      // restore) is ONLY safe for terminals/tmux, which is the sole reason it exists.
-      // Anywhere else — most importantly a screenshot region-drag, whose image is written
-      // to the clipboard asynchronously and can't be sampled reliably — we must not touch
-      // the clipboard at all. Accessibility already covers normal GUI apps.
+      // The Cmd+C fallback (sentinel write + simulated copy + full clipboard restore) is
+      // limited to known apps that need it. Anywhere else — most importantly a screenshot
+      // region-drag, whose image is written to the clipboard asynchronously and can't be
+      // sampled reliably — we must not touch the clipboard at all.
       const frontmostApp = await getFrontmostMacApp();
 
-      if (!isTerminalApp(frontmostApp) || clipboardHoldsNonTextContent()) {
+      if (!allowsClipboardSelectionFallback(frontmostApp) || clipboardHoldsNonTextContent()) {
         return;
       }
 
       const selectionState = await readSelectedTextFromMacApp();
       selectedText = selectionState.selectedText.trim();
 
-      if (typeof selectionState.clipboardBackup === 'string') {
-        clipboard.writeText(selectionState.clipboardBackup);
-      }
+      restoreClipboardSnapshot(selectionState.clipboardSnapshot);
     }
 
     if (selectedText.length < SELECTION_MIN_TEXT_LENGTH) {
