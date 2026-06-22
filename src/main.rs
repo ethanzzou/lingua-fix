@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{cmp, collections::HashSet};
 
@@ -85,6 +86,21 @@ async fn main() -> Result<(), String> {
 
 #[derive(Clone)]
 struct AppState {}
+
+// A single process-wide HTTP client. reqwest::Client is internally reference-counted and
+// holds a connection pool, so cloning is cheap and reusing it keeps TLS connections to the
+// LLM endpoints alive between requests — building a fresh client per request forced a cold
+// TLS handshake every time, which dominated the hot path for the in-place translate hotkey.
+fn shared_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .build()
+                .expect("Could not build shared HTTP client")
+        })
+        .clone()
+}
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
@@ -1589,9 +1605,7 @@ impl OpenAiClient {
             ],
         };
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+        let client = shared_http_client();
 
         let response = client
             .post("https://api.openai.com/v1/responses")
@@ -1742,9 +1756,7 @@ impl GeminiClient {
             }],
         };
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+        let client = shared_http_client();
 
         let url = match (self.api, self.auth) {
             (GeminiApi::AiStudio, GeminiAuth::ApiKey) => {
@@ -1952,9 +1964,7 @@ impl BedrockClient {
             .to_owned();
         let signed = sign_bedrock_request(&self.credentials, &region, &host, &path, &body_bytes)?;
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+        let client = shared_http_client();
         let mut request = client
             .post(&url)
             .header("authorization", signed.authorization)
@@ -2185,9 +2195,7 @@ impl ChatCompletionsClient {
 
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+        let client = shared_http_client();
 
         let response = client
             .post(&url)

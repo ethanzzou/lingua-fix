@@ -77,6 +77,10 @@ let popupIgnoreBlurUntil = 0;
 let popupHelperProcess = null;
 let serviceProcess = null;
 let ownsServiceProcess = false;
+// Once we have confirmed the Rust service answers /health, skip the probe on the hot path
+// (every hotkey press went through an extra localhost round trip). Reset whenever the
+// service exits or a request actually fails, so a crashed/restarted service is re-probed.
+let serviceConfirmedHealthy = false;
 let isQuitting = false;
 let isRunningSelectionWorkflow = false;
 let statusBarItem = null;
@@ -173,6 +177,7 @@ function startRustService() {
   serviceProcess.on('exit', () => {
     serviceProcess = null;
     ownsServiceProcess = false;
+    serviceConfirmedHealthy = false;
   });
 }
 
@@ -181,6 +186,7 @@ async function waitForService() {
 
   while (Date.now() - startedAt < 30000) {
     if (await isServiceHealthy()) {
+      serviceConfirmedHealthy = true;
       return;
     }
 
@@ -191,7 +197,13 @@ async function waitForService() {
 }
 
 async function ensureRustService() {
+  // Fast path: we have already seen the service answer, so skip the localhost round trip.
+  if (serviceConfirmedHealthy) {
+    return;
+  }
+
   if (await isServiceHealthy()) {
+    serviceConfirmedHealthy = true;
     return;
   }
 
@@ -202,14 +214,25 @@ async function ensureRustService() {
 async function callService(pathname, options = {}) {
   await ensureRustService();
 
-  const response = await fetch(`${SERVICE_URL}${pathname}`, {
+  const requestInit = {
     ...options,
     headers: {
       accept: 'application/json',
       ...(options.body ? { 'content-type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
-  });
+  };
+
+  let response;
+  try {
+    response = await fetch(`${SERVICE_URL}${pathname}`, requestInit);
+  } catch (error) {
+    // The cached health flag was stale (service crashed or was restarted out from under
+    // us). Drop it, make sure the service is back up, and retry the request once.
+    serviceConfirmedHealthy = false;
+    await ensureRustService();
+    response = await fetch(`${SERVICE_URL}${pathname}`, requestInit);
+  }
 
   const rawBody = await response.text();
   const contentType = response.headers.get('content-type') || '';
@@ -284,10 +307,6 @@ function notify(message) {
   console.log(`[LinguaFix] ${message}`);
 }
 
-function appleScriptQuoted(value) {
-  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
-}
-
 async function runAppleScript(script) {
   const { stdout } = await execFile('osascript', ['-e', script]);
   return stdout.trim();
@@ -323,44 +342,6 @@ async function getFrontmostMacApp() {
   `);
 
   return parseMacAppIdentity(rawIdentity);
-}
-
-function macAppProcessLookupScript(macApp) {
-  if (!macApp?.pid && !macApp?.bundleIdentifier && !macApp?.name) {
-    return '';
-  }
-
-  return `
-    set targetProcess to missing value
-    repeat with candidateProcess in application processes
-      try
-        if ${macApp?.pid ? `(unix id of candidateProcess as integer) is ${macApp.pid}` : 'false'} then
-          set targetProcess to candidateProcess
-          exit repeat
-        end if
-      end try
-    end repeat
-    if targetProcess is missing value then
-      repeat with candidateProcess in application processes
-        try
-          if ${macApp?.bundleIdentifier ? `(bundle identifier of candidateProcess as string) is ${appleScriptQuoted(macApp.bundleIdentifier)}` : 'false'} then
-            set targetProcess to candidateProcess
-            exit repeat
-          end if
-        end try
-      end repeat
-    end if
-    if targetProcess is missing value then
-      repeat with candidateProcess in application processes
-        try
-          if ${macApp?.name ? `(name of candidateProcess as string) is ${appleScriptQuoted(macApp.name)}` : 'false'} then
-            set targetProcess to candidateProcess
-            exit repeat
-          end if
-        end try
-      end repeat
-    end if
-  `;
 }
 
 // True when the clipboard holds image/non-text content (e.g. a screenshot just taken
@@ -494,16 +475,17 @@ async function readSelectedTextFromMacApp() {
 
 async function replaceSelectionInMacApp(text, clipboardSnapshot, frontmostApp) {
   clipboard.writeText(text);
-  const processLookup = macAppProcessLookupScript(frontmostApp);
 
-  if (processLookup) {
+  // Re-focus the original app by pid before pasting. A single `whose unix id is …` filter
+  // is one Apple Event, vastly faster than manually iterating every application process by
+  // pid, then bundle id, then name (the old triple repeat-loop, each iteration its own
+  // round trip, was the slow part). Our own workflow never moves focus between copy and
+  // paste, so this is only a safety net; with no pid we fall back to a bare paste.
+  if (frontmostApp?.pid) {
     await runAppleScript(`
       tell application "System Events"
         try
-          ${processLookup}
-          if targetProcess is not missing value then
-            set frontmost of targetProcess to true
-          end if
+          set frontmost of (first application process whose unix id is ${frontmostApp.pid}) to true
         end try
         keystroke "v" using command down
       end tell
