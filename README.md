@@ -26,6 +26,7 @@ The app combines an Electron desktop shell, a React frontend, and a Rust local s
 - `Ctrl+Shift+L` opens the quick popup
 - `Ctrl+Shift+T` processes the current selection in place on macOS
 - `Ctrl+Shift+R` translates the current English selection into Simplified Chinese in a popup
+- `Ctrl+Shift+S` toggles the selection translation icon on or off
 
 The in-place macOS workflow copies the selected text, sends it through LinguaFix, pastes the result back, and restores the clipboard.
 

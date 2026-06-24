@@ -10,6 +10,7 @@ const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
 const IN_PLACE_TRANSLATE_HOTKEY = 'Control+Shift+T';
 const QUICK_TRANSLATE_POPUP_HOTKEY = 'Control+Shift+L';
 const SELECTION_TO_CHINESE_POPUP_HOTKEY = 'Control+Shift+R';
+const TOGGLE_SELECTION_POPUP_HOTKEY = 'Control+Shift+S';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
 const WINDOW_BACKGROUND_COLOR = '#f5f6f8';
 const execFile = promisify(require('node:child_process').execFile);
@@ -1423,7 +1424,7 @@ async function readSelectionViaAccessibility() {
 }
 
 async function captureSelection() {
-  if (isCapturingSelection || isRunningSelectionWorkflow || ownWindowIsFocused()) {
+  if (!selectionPopupEnabled || isCapturingSelection || isRunningSelectionWorkflow || ownWindowIsFocused()) {
     return;
   }
 
@@ -1669,6 +1670,10 @@ async function refreshSelectionPopupEnabled() {
   } else {
     stopSelectionMouseWatcher();
   }
+
+  if (statusBarItem) {
+    statusBarItem.setContextMenu(buildStatusBarMenu());
+  }
 }
 
 function initSelectionMouseWatcher() {
@@ -1693,6 +1698,23 @@ function registerGlobalHotkeys() {
 
   globalShortcut.register(SELECTION_TO_CHINESE_POPUP_HOTKEY, async () => {
     await tryTranslateSelectedTextToChineseInPopup();
+  });
+
+  globalShortcut.register(TOGGLE_SELECTION_POPUP_HOTKEY, async () => {
+    selectionPopupEnabled = !selectionPopupEnabled;
+    if (selectionPopupEnabled) {
+      startSelectionMouseWatcher();
+    } else {
+      stopSelectionMouseWatcher();
+    }
+    if (statusBarItem) {
+      statusBarItem.setContextMenu(buildStatusBarMenu());
+    }
+    try {
+      const config = await callService('/config');
+      config.selection_popup_enabled = selectionPopupEnabled;
+      await callService('/config', { method: 'PUT', body: JSON.stringify(config) });
+    } catch (_) {}
   });
 }
 
@@ -1750,6 +1772,27 @@ function buildStatusBarMenu() {
       label: 'Process Selected Text',
       click: async () => {
         await tryProcessSelectedTextInPlace();
+      },
+    },
+    {
+      type: 'separator',
+    },
+    {
+      label: 'Selection Translation',
+      type: 'checkbox',
+      checked: selectionPopupEnabled,
+      click: async (menuItem) => {
+        selectionPopupEnabled = menuItem.checked;
+        if (selectionPopupEnabled) {
+          startSelectionMouseWatcher();
+        } else {
+          stopSelectionMouseWatcher();
+        }
+        try {
+          const config = await callService('/config');
+          config.selection_popup_enabled = selectionPopupEnabled;
+          await callService('/config', { method: 'PUT', body: JSON.stringify(config) });
+        } catch (_) {}
       },
     },
     {
