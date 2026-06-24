@@ -91,6 +91,7 @@ let UiohookKey = null;
 let selectionWatcherRunning = false;
 let selectionPopupEnabled = false;
 let selectionConfigPollTimer = null;
+let trayConfigPollTimer = null;
 let selectionMouseDownPoint = null;
 let clipboardAtMouseDown = '';
 let selectionCaptureTimer = null;
@@ -1834,6 +1835,34 @@ function createStatusBarItem() {
   statusBarItem.on('click', () => {
     statusBarItem.popUpContextMenu();
   });
+
+  // The global hotkeys run in the popup-helper process and persist changes to config.
+  // This process owns the tray, so poll config to keep the menu checkbox in sync.
+  if (trayConfigPollTimer) {
+    clearInterval(trayConfigPollTimer);
+  }
+  trayConfigPollTimer = setInterval(() => {
+    void syncTrayFromConfig();
+  }, SELECTION_CONFIG_POLL_INTERVAL_MS);
+}
+
+async function syncTrayFromConfig() {
+  let enabled;
+  try {
+    const config = await callService('/config');
+    enabled = Boolean(config?.selection_popup_enabled);
+  } catch (_) {
+    return;
+  }
+
+  if (enabled === selectionPopupEnabled) {
+    return;
+  }
+
+  selectionPopupEnabled = enabled;
+  if (statusBarItem) {
+    statusBarItem.setContextMenu(buildStatusBarMenu());
+  }
 }
 
 function destroyStatusBarItem() {
