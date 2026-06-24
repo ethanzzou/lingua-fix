@@ -14,8 +14,14 @@ const TOGGLE_SELECTION_POPUP_HOTKEY = 'Control+Shift+S';
 const APP_ROLE = process.env.LINGUAFIX_APP_ROLE === 'popup-helper' ? 'popup-helper' : 'main';
 const WINDOW_BACKGROUND_COLOR = '#f5f6f8';
 const execFile = promisify(require('node:child_process').execFile);
-const AUTOMATION_COPY_POLL_ATTEMPTS = 10;
-const AUTOMATION_COPY_POLL_DELAY_MS = 30;
+const AUTOMATION_COPY_POLL_ATTEMPTS = 25;
+const AUTOMATION_COPY_POLL_DELAY_MS = 40;
+// Wait before issuing the synthetic Cmd+C so the user can release the hotkey chord
+// (e.g. Control+Shift+R). Otherwise macOS merges the held modifiers with the synthetic
+// keystroke (Cmd+Ctrl+Shift+C) and nothing gets copied.
+const AUTOMATION_COPY_SETTLE_DELAY_MS = 150;
+// Retry the copy a second time; by then any physically held modifiers are guaranteed up.
+const AUTOMATION_COPY_RETRY_ROUNDS = 2;
 const AUTOMATION_PASTE_RESTORE_DELAY_MS = 80;
 const SELECTION_DRAG_THRESHOLD_PX = 6;
 const SELECTION_CAPTURE_DEBOUNCE_MS = 250;
@@ -440,19 +446,26 @@ async function readSelectedTextFromMacClipboard(clipboardSnapshot) {
   const clipboardSentinel = `__LINGUAFIX_SELECTION__${Date.now()}__`;
 
   clipboard.writeText(clipboardSentinel);
-  await triggerMacSelectionShortcut('c');
 
-  let selectedText = '';
+  // The hotkey that triggers this workflow (e.g. Control+Shift+R) is usually still being
+  // physically held when we get here. Firing the synthetic Cmd+C immediately makes macOS
+  // merge it with the held modifiers (Cmd+Ctrl+Shift+C), so nothing is copied. Wait a beat
+  // for the chord to release before each copy, and retry once: by the second round the
+  // modifiers are guaranteed to be up.
+  for (let round = 0; round < AUTOMATION_COPY_RETRY_ROUNDS; round += 1) {
+    await sleep(AUTOMATION_COPY_SETTLE_DELAY_MS);
+    await triggerMacSelectionShortcut('c');
 
-  for (let attempt = 0; attempt < AUTOMATION_COPY_POLL_ATTEMPTS; attempt += 1) {
-    await sleep(AUTOMATION_COPY_POLL_DELAY_MS);
-    selectedText = clipboard.readText();
+    for (let attempt = 0; attempt < AUTOMATION_COPY_POLL_ATTEMPTS; attempt += 1) {
+      await sleep(AUTOMATION_COPY_POLL_DELAY_MS);
+      const selectedText = clipboard.readText();
 
-    if (selectedText !== clipboardSentinel) {
-      return {
-        clipboardSnapshot,
-        selectedText,
-      };
+      if (selectedText !== clipboardSentinel) {
+        return {
+          clipboardSnapshot,
+          selectedText,
+        };
+      }
     }
   }
 
