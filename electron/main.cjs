@@ -16,11 +16,7 @@ const WINDOW_BACKGROUND_COLOR = '#f5f6f8';
 const execFile = promisify(require('node:child_process').execFile);
 const AUTOMATION_COPY_POLL_ATTEMPTS = 25;
 const AUTOMATION_COPY_POLL_DELAY_MS = 40;
-// Wait before issuing the synthetic Cmd+C so the user can release the hotkey chord
-// (e.g. Control+Shift+R). Otherwise macOS merges the held modifiers with the synthetic
-// keystroke (Cmd+Ctrl+Shift+C) and nothing gets copied.
-const AUTOMATION_COPY_SETTLE_DELAY_MS = 150;
-// Retry the copy a second time; by then any physically held modifiers are guaranteed up.
+// Retry for apps whose clipboard update is delayed, after checking physical modifiers.
 const AUTOMATION_COPY_RETRY_ROUNDS = 2;
 const AUTOMATION_PASTE_RESTORE_DELAY_MS = 80;
 const SELECTION_DRAG_THRESHOLD_PX = 6;
@@ -315,17 +311,60 @@ function notify(message) {
   console.log(`[LinguaFix] ${message}`);
 }
 
+function traceSelection(event, details = {}) {
+  // Diagnostics deliberately omit selected text and clipboard contents.
+  try {
+    fs.appendFileSync(path.join(app.getPath('userData'), 'selection-debug.jsonl'),
+      JSON.stringify({ time: new Date().toISOString(), pid: process.pid, event, ...details }) + '\n');
+  } catch (_) {}
+}
+
 async function runAppleScript(script) {
   const { stdout } = await execFile('osascript', ['-e', script]);
   return stdout.trim();
 }
 
-async function triggerMacSelectionShortcut(key) {
-  await runAppleScript(`
+function buildMacSelectionShortcutScript(key, pid = null) {
+  const keyCode = { c: 8, v: 9 }[key];
+  if (keyCode === undefined) {
+    throw new Error('Unsupported selection shortcut.');
+  }
+
+  return `
+    use framework "AppKit"
+    use scripting additions
+    set modifiersReleased to false
+    repeat 150 times
+      set modifierFlags to (current application's NSEvent's modifierFlags()) as integer
+      -- Bits 17 through 20 are Shift, Control, Option and Command; ignore Caps Lock.
+      if (modifierFlags div 131072) mod 16 is 0 then
+        set modifiersReleased to true
+        exit repeat
+      end if
+      delay 0.02
+    end repeat
+    if not modifiersReleased then error "Release the shortcut keys and try again."
     tell application "System Events"
-      keystroke "${key}" using command down
+      ${Number.isInteger(pid) && pid > 0 ? `set frontmost of (first application process whose unix id is ${pid}) to true` : ''}
+      key code ${keyCode} using command down
     end tell
-  `);
+  `;
+}
+
+async function triggerMacSelectionShortcut(key, pid = null) {
+  await runAppleScript(buildMacSelectionShortcutScript(key, pid));
+}
+
+async function waitForPendingSelectionCapture() {
+  if (selectionCaptureTimer) {
+    clearTimeout(selectionCaptureTimer);
+    selectionCaptureTimer = null;
+  }
+  // The hotkey has already claimed isRunningSelectionWorkflow, so no new mouse
+  // capture can start. Let an existing capture restore its clipboard before we copy.
+  while (isCapturingSelection) {
+    await sleep(20);
+  }
 }
 
 function parseMacAppIdentity(rawIdentity) {
@@ -376,6 +415,7 @@ function readClipboardSnapshot() {
   const snapshot = {
     text: '',
     formats: [],
+    image: null,
   };
 
   try {
@@ -383,6 +423,13 @@ function readClipboardSnapshot() {
   } catch (_) {
     snapshot.text = '';
   }
+
+  // Keep a native image as well as raw formats. Replaying writeBuffer for each
+  // screenshot format can leave only the final (often private) format available.
+  try {
+    const image = clipboard.readImage();
+    if (!image.isEmpty()) snapshot.image = image;
+  } catch (_) {}
 
   try {
     for (const format of clipboard.availableFormats()) {
@@ -409,6 +456,11 @@ function restoreClipboardSnapshot(snapshot) {
   }
 
   try {
+    if (snapshot.image && !snapshot.image.isEmpty()) {
+      clipboard.write({ image: snapshot.image, text: snapshot.text || '' });
+      return;
+    }
+
     clipboard.clear();
 
     if (Array.isArray(snapshot.formats) && snapshot.formats.length > 0) {
@@ -432,13 +484,13 @@ function restoreClipboardSnapshot(snapshot) {
   }
 }
 
-async function readSelectedTextFromMacClipboard(clipboardSnapshot) {
-  // Refuse to write the sentinel over an image/non-text clipboard (e.g. a fresh
-  // screenshot). Snapshot restoration is best-effort, and image clipboard writes from
-  // screenshot tools can still race this workflow, so do not touch that clipboard state.
-  if (clipboardHoldsNonTextContent()) {
+async function readSelectedTextFromMacClipboard(clipboardSnapshot, { explicitShortcut = false } = {}) {
+  // Passive mouse capture must not race screenshot tools. An explicit hotkey is
+  // different: the user wants to copy selected text, regardless of clipboard content.
+  if (!explicitShortcut && clipboardHoldsNonTextContent()) {
+    traceSelection('copy-skipped-image', { explicitShortcut });
     return {
-      clipboardSnapshot,
+      clipboardSnapshot: null,
       selectedText: '',
     };
   }
@@ -447,29 +499,34 @@ async function readSelectedTextFromMacClipboard(clipboardSnapshot) {
 
   clipboard.writeText(clipboardSentinel);
 
-  // The hotkey that triggers this workflow (e.g. Control+Shift+R) is usually still being
-  // physically held when we get here. Firing the synthetic Cmd+C immediately makes macOS
-  // merge it with the held modifiers (Cmd+Ctrl+Shift+C), so nothing is copied. Wait a beat
-  // for the chord to release before each copy, and retry once: by the second round the
-  // modifiers are guaranteed to be up.
-  for (let round = 0; round < AUTOMATION_COPY_RETRY_ROUNDS; round += 1) {
-    await sleep(AUTOMATION_COPY_SETTLE_DELAY_MS);
-    await triggerMacSelectionShortcut('c');
+  try {
+    for (let round = 0; round < AUTOMATION_COPY_RETRY_ROUNDS; round += 1) {
+      traceSelection('copy-dispatch', { round, explicitShortcut, frontmost: await getFrontmostMacApp() });
+      await triggerMacSelectionShortcut('c');
+      traceSelection('copy-dispatched', { round, frontmost: await getFrontmostMacApp() });
 
-    for (let attempt = 0; attempt < AUTOMATION_COPY_POLL_ATTEMPTS; attempt += 1) {
-      await sleep(AUTOMATION_COPY_POLL_DELAY_MS);
-      const selectedText = clipboard.readText();
+      for (let attempt = 0; attempt < AUTOMATION_COPY_POLL_ATTEMPTS; attempt += 1) {
+        await sleep(AUTOMATION_COPY_POLL_DELAY_MS);
+        const selectedText = clipboard.readText();
 
-      if (selectedText !== clipboardSentinel) {
-        return {
-          clipboardSnapshot,
-          selectedText,
-        };
+        if (selectedText !== clipboardSentinel) {
+          traceSelection('clipboard-changed', { round, length: selectedText.length, formats: clipboard.availableFormats() });
+          return {
+            clipboardSnapshot,
+            selectedText,
+          };
+        }
       }
     }
+  } catch (error) {
+    // The caller cannot restore this snapshot if copying throws before returning it.
+    restoreClipboardSnapshot(clipboardSnapshot);
+    throw error;
   }
 
   restoreClipboardSnapshot(clipboardSnapshot);
+
+  traceSelection('copy-no-change');
 
   return {
     clipboardSnapshot,
@@ -477,10 +534,21 @@ async function readSelectedTextFromMacClipboard(clipboardSnapshot) {
   };
 }
 
-async function readSelectedTextFromMacApp() {
-  const clipboardSnapshot = readClipboardSnapshot();
+async function readSelectedTextFromMacApp({ explicitShortcut = true } = {}) {
   const frontmostApp = await getFrontmostMacApp();
-  const clipboardSelectionState = await readSelectedTextFromMacClipboard(clipboardSnapshot);
+  traceSelection('selection-start', { explicitShortcut, frontmostApp, formats: clipboard.availableFormats() });
+  // Explicit hotkeys can read the selection without synthesizing a copy, even when
+  // the clipboard holds a screenshot. Mouse capture has already tried accessibility.
+  if (explicitShortcut) {
+    const selectedText = await readSelectionViaAccessibility();
+    traceSelection('accessibility-result', { length: selectedText.length });
+    if (selectedText) {
+      return { frontmostApp, selectedText, clipboardSnapshot: null };
+    }
+  }
+
+  const clipboardSnapshot = readClipboardSnapshot();
+  const clipboardSelectionState = await readSelectedTextFromMacClipboard(clipboardSnapshot, { explicitShortcut });
 
   return {
     ...clipboardSelectionState,
@@ -489,31 +557,18 @@ async function readSelectedTextFromMacApp() {
 }
 
 async function replaceSelectionInMacApp(text, clipboardSnapshot, frontmostApp) {
-  clipboard.writeText(text);
-
-  // Re-focus the original app by pid before pasting. A single `whose unix id is …` filter
-  // is one Apple Event, vastly faster than manually iterating every application process by
-  // pid, then bundle id, then name (the old triple repeat-loop, each iteration its own
-  // round trip, was the slow part). Our own workflow never moves focus between copy and
-  // paste, so this is only a safety net; with no pid we fall back to a bare paste.
-  if (frontmostApp?.pid) {
-    await runAppleScript(`
-      tell application "System Events"
-        try
-          set frontmost of (first application process whose unix id is ${frontmostApp.pid}) to true
-        end try
-        keystroke "v" using command down
-      end tell
-    `);
-  } else {
-    await triggerMacSelectionShortcut('v');
+  const snapshot = clipboardSnapshot || readClipboardSnapshot();
+  try {
+    clipboard.writeText(text);
+    await triggerMacSelectionShortcut('v', frontmostApp?.pid);
+    await sleep(AUTOMATION_PASTE_RESTORE_DELAY_MS);
+  } finally {
+    restoreClipboardSnapshot(snapshot);
   }
-
-  await sleep(AUTOMATION_PASTE_RESTORE_DELAY_MS);
-  restoreClipboardSnapshot(clipboardSnapshot);
 }
 
 async function tryProcessSelectedTextInPlace() {
+  traceSelection('in-place-hotkey', { busy: isRunningSelectionWorkflow, capturing: isCapturingSelection });
   if (process.platform !== 'darwin') {
     notify('In-place selection replace is currently supported on macOS only.');
     return true;
@@ -527,6 +582,7 @@ async function tryProcessSelectedTextInPlace() {
   let clipboardSnapshot = null;
 
   try {
+    await waitForPendingSelectionCapture();
     const selectionState = await readSelectedTextFromMacApp();
     clipboardSnapshot = selectionState.clipboardSnapshot;
     const { frontmostApp, selectedText } = selectionState;
@@ -835,6 +891,7 @@ async function tryTranslateSelectedTextToChineseInPopup() {
   let clipboardSnapshot = null;
 
   try {
+    await waitForPendingSelectionCapture();
     const selectionState = await readSelectedTextFromMacApp();
     clipboardSnapshot = selectionState.clipboardSnapshot;
     const selectedText = selectionState.selectedText.trim();
@@ -1475,13 +1532,13 @@ async function captureSelection() {
         return;
       }
 
-      const selectionState = await readSelectedTextFromMacApp();
+      const selectionState = await readSelectedTextFromMacApp({ explicitShortcut: false });
       selectedText = selectionState.selectedText.trim();
 
       restoreClipboardSnapshot(selectionState.clipboardSnapshot);
     }
 
-    if (selectedText.length < SELECTION_MIN_TEXT_LENGTH) {
+    if (isRunningSelectionWorkflow || selectedText.length < SELECTION_MIN_TEXT_LENGTH) {
       return;
     }
 

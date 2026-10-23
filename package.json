@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && env LINGUAFIX_USE_DEV_SERVER=1 electron .\"",
     "build": "npm --prefix frontend run build && cargo build --release",
+    "test": "node --test electron/tests/*.test.cjs",
     "start": "electron .",
     "install:mac-app": "bash ./scripts/install-mac-app.sh"
   },
