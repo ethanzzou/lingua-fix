@@ -4,6 +4,7 @@ const { spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const process = require('node:process');
 const fs = require('node:fs');
+const os = require('node:os');
 
 const SERVICE_PORT = Number(process.env.LINGUAFIX_PORT || 8787);
 const SERVICE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
@@ -79,6 +80,7 @@ let popupWindow = null;
 let popupIgnoreBlurUntil = 0;
 let popupHelperProcess = null;
 let serviceProcess = null;
+let serviceStartupError = null;
 let ownsServiceProcess = false;
 // Once we have confirmed the Rust service answers /health, skip the probe on the hot path
 // (every hotkey press went through an extra localhost round trip). Reset whenever the
@@ -128,10 +130,33 @@ function isPopupHelperProcess() {
 
 function resolveRustCommand() {
   if (isDev()) {
+    // Finder launches do not inherit the shell's PATH or Cargo environment.
+    const cargoHome = process.env.CARGO_HOME || path.join(os.homedir(), '.cargo');
+    const searchPaths = [
+      ...(process.env.PATH || '').split(path.delimiter).filter(Boolean),
+      path.join(cargoHome, 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ];
+    const cargoName = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
+    const cargoPath = searchPaths.map((directory) => path.join(directory, cargoName))
+      .find((candidate) => {
+        try {
+          fs.accessSync(candidate, fs.constants.X_OK);
+          return fs.statSync(candidate).isFile();
+        } catch (_) {
+          return false;
+        }
+      });
+    if (!cargoPath) {
+      throw new Error('Cargo was not found. Install the Rust toolchain or set CARGO_HOME to its installation folder.');
+    }
+
     return {
-      command: 'cargo',
+      command: cargoPath,
       args: ['run', '--quiet'],
       cwd: app.getAppPath(),
+      env: { PATH: [...new Set([path.dirname(cargoPath), ...searchPaths])].join(path.delimiter) },
     };
   }
 
@@ -162,26 +187,40 @@ async function isServiceHealthy() {
   }
 }
 
-function startRustService() {
+async function startRustService() {
   if (serviceProcess) {
     return;
   }
 
   const service = resolveRustCommand();
-  serviceProcess = spawn(service.command, service.args, {
+  serviceStartupError = null;
+  const child = spawn(service.command, service.args, {
     cwd: service.cwd,
     env: {
       ...process.env,
+      ...service.env,
       LINGUAFIX_PORT: String(SERVICE_PORT),
     },
     stdio: 'inherit',
   });
+  serviceProcess = child;
   ownsServiceProcess = true;
 
-  serviceProcess.on('exit', () => {
-    serviceProcess = null;
-    ownsServiceProcess = false;
-    serviceConfirmedHealthy = false;
+  const resetService = () => {
+    if (serviceProcess === child) {
+      serviceProcess = null;
+      ownsServiceProcess = false;
+      serviceConfirmedHealthy = false;
+    }
+  };
+  child.on('exit', resetService);
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.on('error', (error) => {
+      serviceStartupError = new Error(`Rust service could not be started: ${error.message}`);
+      resetService();
+      reject(serviceStartupError);
+    });
   });
 }
 
@@ -189,6 +228,9 @@ async function waitForService() {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < 30000) {
+    if (serviceStartupError) {
+      throw serviceStartupError;
+    }
     if (await isServiceHealthy()) {
       serviceConfirmedHealthy = true;
       return;
@@ -211,7 +253,7 @@ async function ensureRustService() {
     return;
   }
 
-  startRustService();
+  await startRustService();
   await waitForService();
 }
 
@@ -2007,7 +2049,13 @@ app.whenReady().then(async () => {
   }
 
   if (isPopupHelperProcess()) {
-    await ensureRustService();
+    try {
+      await ensureRustService();
+    } catch (error) {
+      notify(error.message);
+      app.quit();
+      return;
+    }
     createPopupWindow();
     registerGlobalHotkeys();
     initSelectionMouseWatcher();
